@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "baro.airplay",
+  "name": "Screen Mirroring",
+  "version": "1.0.0",
+  "author": "Glenn Arnold Barosen",
+  "description": "Mirror your desktop to an Apple TV or other AirPlay 2 receiver, from the bar",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "Screen Mirroring",
+    "description": "AirPlay receiver list with connect, disconnect and pairing",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "schema": [
+      {
+        "key": "hwaccel",
+        "type": "string",
+        "label": "Hardware encoder",
+        "description": "H.264 encoder passed to doubletake when this plugin starts it: auto, vaapi, nvenc, openh264, or none for software x264. Leave on auto unless auto picks wrong.",
+        "defaultValue": "auto"
+      }
+    ]
+  }
+}
