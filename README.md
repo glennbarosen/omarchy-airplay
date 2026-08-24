@@ -46,6 +46,25 @@ omarchy plugin enable baro.airplay
 Plugins land **disabled** so you can read the code first. Please do — see
 **Security** below for what to look at.
 
+## Removing it
+
+```bash
+omarchy plugin disable baro.airplay
+omarchy plugin remove baro.airplay
+```
+
+That takes the widget out of your bar and deletes the plugin directory. It leaves
+doubletake and its saved pairings alone, since this plugin did not install them.
+To go further:
+
+```bash
+omarchy pkg drop doubletake-git      # or doubletake / doubletake-bin
+rm -rf ~/.config/doubletake          # saved receiver pairings
+```
+
+If you embedded `airplay/Section.qml` in a cloned Display panel, remove that import
+and the `Section { … }` block from the clone first, or the panel will fail to load.
+
 ## First run
 
 Click the icon, then click your receiver. The Apple TV shows a 4-digit code and
