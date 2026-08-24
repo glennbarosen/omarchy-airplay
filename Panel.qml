@@ -85,11 +85,13 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    // md-cast_variant (U+F001F) — the AirPlay mark, the same screen-plus-
-    // triangle macOS uses for Screen Mirroring. Deliberately not md-monitor
-    // or md-monitor_multiple: those are the Display widget's glyphs, and not
-    // md-television either, which is what the rows below use.
-    text: "󰀟"
+    // md-television (U+F0839). A filled badge rather than another outlined
+    // rectangle, so it stays legible next to the Display widget at bar size.
+    // Deliberately NOT md-monitor or md-monitor_multiple: the Display widget
+    // owns both, swapping to monitor_multiple whenever a second screen is
+    // attached. The receiver rows use this same glyph, matching how the
+    // Bluetooth widget shares its glyph with its device rows.
+    text: "󰠹"
     // WidgetButton.active paints with bar.urgent, so a live stream reads as a
     // state on the icon rather than a different icon appearing in the bar.
     active: root.mirroring
@@ -143,7 +145,7 @@ Panel {
             fontFamily: root.bar.fontFamily
 
             iconComponent: Text {
-              text: "󰀟"
+              text: "󰠹"
               color: root.bar.foreground
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.display
