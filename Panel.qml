@@ -85,7 +85,11 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: "󰠹"
+    // md-cast_variant (U+F001F) — the AirPlay mark, the same screen-plus-
+    // triangle macOS uses for Screen Mirroring. Deliberately not md-monitor
+    // or md-monitor_multiple: those are the Display widget's glyphs, and not
+    // md-television either, which is what the rows below use.
+    text: "󰀟"
     // WidgetButton.active paints with bar.urgent, so a live stream reads as a
     // state on the icon rather than a different icon appearing in the bar.
     active: root.mirroring
@@ -139,7 +143,7 @@ Panel {
             fontFamily: root.bar.fontFamily
 
             iconComponent: Text {
-              text: "󰠹"
+              text: "󰀟"
               color: root.bar.foreground
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.display
