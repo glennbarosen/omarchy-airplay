@@ -189,6 +189,16 @@ test("refreshSnapshot accepts the idle status shape with omitted optional stream
   });
 });
 
+test("refreshSnapshot accepts a zero-device response with both optional arrays omitted", () => {
+  const status = Proto.parseResponse('{"ok":true,"state":"idle"}');
+  const devices = Proto.parseResponse('{"ok":true,"state":"idle"}');
+
+  assert.deepEqual(Proto.refreshSnapshot(status, devices), {
+    streams: [],
+    devices: [],
+  });
+});
+
 test("refreshSnapshot refuses every partial or rejected refresh", () => {
   const status = Proto.parseResponse('{"ok":true,"state":"idle","streams":[]}');
   const devices = Proto.parseResponse('{"ok":true,"state":"idle","devices":[]}');
