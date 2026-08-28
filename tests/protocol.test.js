@@ -175,6 +175,20 @@ test("refreshSnapshot publishes status and devices only as one complete result",
   });
 });
 
+test("refreshSnapshot accepts the idle status shape with omitted optional streams", () => {
+  const status = Proto.parseResponse(
+    '{"ok":true,"state":"idle","has_audio":false,"audio_muted":false}'
+  );
+  const devices = Proto.parseResponse(
+    '{"ok":true,"state":"idle","devices":[{"name":"TV","model":"AppleTV14,1","ip":"192.0.2.10","port":7000}]}'
+  );
+
+  assert.deepEqual(Proto.refreshSnapshot(status, devices), {
+    streams: [],
+    devices: devices.devices,
+  });
+});
+
 test("refreshSnapshot refuses every partial or rejected refresh", () => {
   const status = Proto.parseResponse('{"ok":true,"state":"idle","streams":[]}');
   const devices = Proto.parseResponse('{"ok":true,"state":"idle","devices":[]}');

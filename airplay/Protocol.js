@@ -129,9 +129,10 @@ function parseResponse(text) {
 // publishing either half until both validated replies are present.
 function refreshSnapshot(status, devices) {
   if (!status || !devices || status.ok !== true || devices.ok !== true) return null
-  if (!Array.isArray(status.streams) || !Array.isArray(devices.devices)) return null
+  if (status.streams !== undefined && !Array.isArray(status.streams)) return null
+  if (!Array.isArray(devices.devices)) return null
   return {
-    streams: status.streams,
+    streams: status.streams || [],
     devices: devices.devices
   }
 }
