@@ -33,16 +33,20 @@ Item {
 
   // Emitted once per request. `response` is the parsed daemon object, or null
   // when nothing usable came back; `cmd` and `target` identify what was asked.
-  signal answered(string cmd, string target, var response)
+  signal answered(string cmd, string target, var response, string failureKind)
 
   readonly property bool busy: pending !== null
 
-  // Resolved once, before any write, so a request can never be aimed at an
-  // unresolved path. Mirrors doubletake's own default: XDG_RUNTIME_DIR, else
-  // /tmp.
-  readonly property string path: Protocol.socketPath({
-    XDG_RUNTIME_DIR: String(Quickshell.env("XDG_RUNTIME_DIR") || "")
-  })
+  // Production tries the XDG runtime socket first and the legacy /tmp path
+  // only when the first connection fails before a payload is written. Tests
+  // may supply two isolated absolute paths instead of touching the real /tmp.
+  property var socketPathsOverride: null
+  readonly property var paths: socketPathsOverride !== null
+    ? socketPathsOverride
+    : Protocol.socketPaths({
+        XDG_RUNTIME_DIR: String(Quickshell.env("XDG_RUNTIME_DIR") || "")
+      })
+  readonly property string path: paths.length > 0 ? paths[0] : ""
 
   property var pending: null
   property int generation: 0
@@ -62,12 +66,20 @@ Item {
     controller.generation += 1
     var request = Protocol.beginRequest(controller.generation, cmd, options)
     if (request === null) return false
-    if (!Protocol.canWrite(controller.path, request.line)) return false
+    request.socketPaths = Array.prototype.slice.call(controller.paths)
+    request.socketPath = request.socketPaths.length > 0 ? request.socketPaths[0] : ""
+    request.payloadWritten = false
+    if (!Protocol.canWrite(request.socketPath, request.line)) return false
 
     controller.pending = request
     timeout.restart()
+    controller.openTransport(request)
+    return true
+  }
+
+  function openTransport(request) {
     var candidate = socketComponent.createObject(controller, {
-      path: controller.path,
+      path: request.socketPath,
       requestGeneration: request.generation
     })
     controller.transport = candidate
@@ -77,12 +89,28 @@ Item {
       candidate.started = true
       candidate.connected = true
     })
+  }
+
+  function retryFallback(expectedGeneration, failedTransport) {
+    var request = controller.requestForGeneration(expectedGeneration)
+    if (request === null || controller.transport !== failedTransport) return false
+    var fallback = Protocol.fallbackSocketPath(
+      request.socketPaths, request.socketPath, request.payloadWritten
+    )
+    if (fallback === "") return false
+
+    controller.transport = null
+    failedTransport.started = false
+    failedTransport.connected = false
+    failedTransport.destroy()
+    request.socketPath = fallback
+    controller.openTransport(request)
     return true
   }
 
   // The single exit. Whatever happened, the credential-bearing line is dropped
   // here, the socket is closed, and the result is reported exactly once.
-  function settle(response) {
+  function settle(response, failureKind) {
     var request = controller.pending
     if (request === null) return
 
@@ -99,12 +127,12 @@ Item {
       finishedTransport.destroy()
     }
 
-    controller.answered(cmd, target, response)
+    controller.answered(cmd, target, response, String(failureKind || ""))
   }
 
-  function settleForGeneration(expectedGeneration, response) {
+  function settleForGeneration(expectedGeneration, response, failureKind) {
     if (controller.requestForGeneration(expectedGeneration) === null) return
-    controller.settle(response)
+    controller.settle(response, failureKind)
   }
 
   // Quickshell 0.3.x retains a failed QLocalSocket after an initial
@@ -128,12 +156,17 @@ Item {
         id: socket
 
         onConnectionStateChanged: {
+          if (controller.transport !== requestTransport) {
+            if (connected) socket.connected = false
+            return
+          }
           if (connected) {
             var request = controller.requestForGeneration(requestTransport.requestGeneration)
             if (request === null || request.done) {
               socket.connected = false
               return
             }
+            request.payloadWritten = true
             // Written and flushed in the same turn: the daemon reads one line and
             // will not answer until it has one.
             socket.write(request.line)
@@ -142,13 +175,22 @@ Item {
             // flight but the secret is gone from this process.
             Protocol.clearCredential(request)
           } else if (requestTransport.started) {
-            controller.settleForGeneration(requestTransport.requestGeneration, null)
+            if (controller.retryFallback(
+                requestTransport.requestGeneration, requestTransport)) return
+            var request = controller.requestForGeneration(requestTransport.requestGeneration)
+            var failureKind = request !== null && request.payloadWritten
+              ? "socketClosed"
+              : "socketUnavailable"
+            controller.settleForGeneration(
+              requestTransport.requestGeneration, null, failureKind
+            )
           }
         }
 
         parser: SplitParser {
           splitMarker: "\n"
           onRead: function (line) {
+            if (controller.transport !== requestTransport) return
             var request = controller.requestForGeneration(requestTransport.requestGeneration)
             if (request === null) return
             var result = Protocol.acceptResponse(
@@ -156,7 +198,7 @@ Item {
             )
             if (!result.accepted) return
             controller.settleForGeneration(
-              requestTransport.requestGeneration, result.response
+              requestTransport.requestGeneration, result.response, result.failureKind
             )
           }
         }
@@ -165,7 +207,16 @@ Item {
       Connections {
         target: socket
         function onError() {
-          controller.settleForGeneration(requestTransport.requestGeneration, null)
+          if (controller.transport !== requestTransport) return
+          if (controller.retryFallback(
+              requestTransport.requestGeneration, requestTransport)) return
+          var request = controller.requestForGeneration(requestTransport.requestGeneration)
+          var failureKind = request !== null && request.payloadWritten
+            ? "socketClosed"
+            : "socketUnavailable"
+          controller.settleForGeneration(
+            requestTransport.requestGeneration, null, failureKind
+          )
         }
       }
     }
@@ -179,7 +230,7 @@ Item {
     repeat: false
     onTriggered: {
       Protocol.abortRequest(controller.pending, "timeout")
-      controller.settle(null)
+      controller.settle(null, "socketTimeout")
     }
   }
 

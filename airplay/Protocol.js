@@ -39,17 +39,31 @@ var HWACCELS = ["auto", "vaapi", "nvenc", "openh264", "none"]
 
 // ------------------------------------------------------------------ socket path
 
-// Mirrors doubletake's daemon.DefaultSocketPath(): XDG_RUNTIME_DIR, else /tmp.
-// The fallback is resolved here, before the controller is allowed to write, so
-// a request can never be aimed at an unresolved path.
-function socketPath(env) {
+// Prefer doubletake's XDG runtime socket, retaining its legacy /tmp socket as a
+// connection-time fallback. The fallback is attempted only before a payload is
+// written, so one command can never be delivered twice.
+function socketPaths(env) {
   var dir = ""
   if (env && typeof env === "object" && typeof env.XDG_RUNTIME_DIR === "string") {
     dir = env.XDG_RUNTIME_DIR.trim()
   }
-  if (dir === "" || dir.charAt(0) !== "/") dir = "/tmp"
+  if (dir === "" || dir.charAt(0) !== "/") return ["/tmp/" + SOCKET_NAME]
   while (dir.length > 1 && dir.charAt(dir.length - 1) === "/") dir = dir.slice(0, -1)
-  return dir + "/" + SOCKET_NAME
+  var runtimePath = dir + "/" + SOCKET_NAME
+  if (runtimePath === "/tmp/" + SOCKET_NAME) return [runtimePath]
+  return [runtimePath, "/tmp/" + SOCKET_NAME]
+}
+
+function socketPath(env) {
+  return socketPaths(env)[0]
+}
+
+function fallbackSocketPath(paths, currentPath, payloadWritten) {
+  if (payloadWritten || !Array.isArray(paths)) return ""
+  var index = paths.indexOf(currentPath)
+  if (index < 0 || index + 1 >= paths.length) return ""
+  var candidate = paths[index + 1]
+  return typeof candidate === "string" && candidate.charAt(0) === "/" ? candidate : ""
 }
 
 // The last gate before Socket.write(). A path that was never resolved and a
@@ -81,9 +95,45 @@ function parseResponse(text) {
 
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null
   if (typeof parsed.ok !== "boolean") return null
+  if (typeof parsed.state !== "string") return null
+  if (parsed.error !== undefined && typeof parsed.error !== "string") return null
   if (parsed.devices !== undefined && !Array.isArray(parsed.devices)) return null
   if (parsed.streams !== undefined && !Array.isArray(parsed.streams)) return null
+  if (parsed.devices !== undefined) {
+    for (var d = 0; d < parsed.devices.length; d++) {
+      var device = parsed.devices[d]
+      if (!device || typeof device !== "object" || Array.isArray(device)) return null
+      if (typeof device.name !== "string" || typeof device.ip !== "string") return null
+      if (device.model !== undefined && typeof device.model !== "string") return null
+      if (device.device_id !== undefined && typeof device.device_id !== "string") return null
+      if (device.port !== undefined && typeof device.port !== "number") return null
+    }
+  }
+  if (parsed.streams !== undefined) {
+    for (var s = 0; s < parsed.streams.length; s++) {
+      var stream = parsed.streams[s]
+      if (!stream || typeof stream !== "object" || Array.isArray(stream)) return null
+      if (typeof stream.device !== "string"
+          || typeof stream.device_ip !== "string"
+          || typeof stream.state !== "string") return null
+      if (stream.credential_kind !== undefined
+          && typeof stream.credential_kind !== "string") return null
+      if (stream.error !== undefined && typeof stream.error !== "string") return null
+    }
+  }
   return parsed
+}
+
+// A panel refresh is a two-response transaction: a status snapshot and the
+// device list that accompanies it. Returning one object here keeps QML from
+// publishing either half until both validated replies are present.
+function refreshSnapshot(status, devices) {
+  if (!status || !devices || status.ok !== true || devices.ok !== true) return null
+  if (!Array.isArray(status.streams) || !Array.isArray(devices.devices)) return null
+  return {
+    streams: status.streams,
+    devices: devices.devices
+  }
 }
 
 // ---------------------------------------------------------- request construction
@@ -181,7 +231,12 @@ function abortRequest(pending, reason) {
 // request means the daemon said more than the one object it promised.
 function acceptResponse(pending, generation, text) {
   if (!pending || pending.done || pending.generation !== generation) {
-    return { accepted: false, response: null, transportFailed: false }
+    return {
+      accepted: false,
+      response: null,
+      transportFailed: false,
+      failureKind: ""
+    }
   }
 
   var response = parseResponse(text)
@@ -189,18 +244,76 @@ function acceptResponse(pending, generation, text) {
   return {
     accepted: true,
     response: response,
-    transportFailed: response === null
+    transportFailed: response === null,
+    failureKind: response === null ? "malformedResponse" : ""
   }
 }
 
 // -------------------------------------------------------------- error reporting
 
+function failureMessage(kind) {
+  switch (kind) {
+    case "socketUnavailable":
+      return "The AirPlay service is unavailable."
+    case "socketTimeout":
+      return "The AirPlay service did not respond within five seconds."
+    case "socketClosed":
+      return "The AirPlay service closed the connection without a response."
+    case "malformedResponse":
+      return "The AirPlay service returned a malformed response."
+    case "requestRejected":
+      return "The AirPlay service rejected the request."
+    case "discoveryReported":
+      return "Receiver discovery reported a problem."
+    case "streamReported":
+      return "The mirroring stream reported a problem."
+    default:
+      return "The AirPlay service reported a problem."
+  }
+}
+
+function responseFailure(cmd, response) {
+  if (!response || typeof response !== "object") return ""
+  if (response.ok !== true) {
+    return (cmd === "devices" || cmd === "discover")
+      ? "discoveryReported"
+      : "requestRejected"
+  }
+  if (cmd === "status") {
+    if (typeof response.error === "string" && response.error !== "") return "streamReported"
+    var streams = response.streams || []
+    for (var i = 0; i < streams.length; i++) {
+      if (streams[i].state === "error"
+          || (typeof streams[i].error === "string" && streams[i].error !== "")) {
+        return "streamReported"
+      }
+    }
+  }
+  if ((cmd === "devices" || cmd === "discover")
+      && typeof response.error === "string" && response.error !== "") {
+    return "discoveryReported"
+  }
+  return ""
+}
+
+// A prior error remains until the complete status+devices transaction
+// succeeds. A newer verified failure replaces it with its sanitized category.
+function nextRefreshError(currentError, failureKind, complete) {
+  if (failureKind) return failureMessage(failureKind)
+  return complete ? "" : String(currentError || "")
+}
+
 // The daemon's own error strings can carry socket paths, credential files and
 // whatever a receiver echoed back, so none of them reach the panel or a log.
 // The user gets one short line naming the action that failed.
-function sanitizeError(cmd, response) {
+function sanitizeError(cmd, response, failureKind) {
+  if (failureKind) return failureMessage(failureKind)
   if (response === null || response === undefined) {
-    return "The AirPlay service stopped responding."
+    return failureMessage("socketClosed")
+  }
+  var reported = responseFailure(cmd, response)
+  if (reported === "streamReported" || reported === "discoveryReported") {
+    return failureMessage(reported)
   }
   switch (cmd) {
     case "connect":

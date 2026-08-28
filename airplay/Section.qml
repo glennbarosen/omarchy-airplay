@@ -33,6 +33,7 @@ Column {
   property var devices: []
   property var streams: []
   property var rows: []
+  property var stagedStatus: null
   property bool discovering: false
   property string errorText: ""
 
@@ -111,7 +112,6 @@ Column {
   // runs in the background until you actually reach for mirroring.
   function ensureDaemon() {
     if (!available || daemonStarting || daemonFailed || !panelOpen || controller.busy) return
-    section.errorText = ""
     section.daemonAttempts = 0
     section.daemonStarting = true
     Quickshell.execDetached(Protocol.daemonCommand(section.hwaccelSetting, section.portRangeSetting))
@@ -125,7 +125,6 @@ Column {
 
   function connectTo(ip, port, code) {
     if (!available || ip === "" || controller.busy) return
-    section.errorText = ""
     section.busyIp = ip
     section.busyKind = "connect"
     var options = { target: ip, port: port }
@@ -142,7 +141,6 @@ Column {
 
   function disconnectFrom(ip) {
     if (!available || controller.busy) return
-    section.errorText = ""
     section.busyIp = ip
     section.busyKind = "disconnect"
     var options = ip === "" ? {} : { target: ip }
@@ -157,7 +155,6 @@ Column {
     for (var i = 0; i < rows.length; i++) {
       if (rows[i].streaming) { section.busyIp = rows[i].ip; break }
     }
-    section.errorText = ""
     section.busyKind = "disconnect"
     if (!controller.send("disconnect", {})) {
       section.busyIp = ""
@@ -219,7 +216,6 @@ Column {
   function resetSource(ip) {
     if (!available || controller.busy || ip === "") return
     section.menuIp = ""
-    section.errorText = ""
     section.busyIp = ip
     section.busyKind = "connect"
     if (!controller.send("reset-restore-token", { target: ip })) {
@@ -276,20 +272,22 @@ Column {
   Controller {
     id: controller
 
-    onAnswered: function (cmd, target, response) {
+    onAnswered: function (cmd, target, response, failureKind) {
       if (cmd === "status") {
         if (response === null) {
-          section.daemonUp = false
-          section.streams = []
-          section.rebuild()
-          if (section.daemonStarting) {
+          section.stagedStatus = null
+          section.errorText = Protocol.nextRefreshError(
+            section.errorText, failureKind || "socketClosed", false
+          )
+          if (failureKind === "socketUnavailable") section.daemonUp = false
+          if (failureKind === "socketUnavailable" && section.daemonStarting) {
             section.daemonAttempts += 1
             if (section.daemonAttempts >= 12) {
               section.daemonStarting = false
               section.daemonFailed = true
               section.errorText = "Could not start the AirPlay service. Try running `doubletake -daemonize` in a terminal."
             }
-          } else {
+          } else if (failureKind === "socketUnavailable") {
             section.ensureDaemon()
           }
           return
@@ -300,42 +298,70 @@ Column {
         section.daemonFailed = false
         section.daemonAttempts = 0
         if (!response.ok) {
-          section.errorText = Protocol.sanitizeError(cmd, response)
+          section.stagedStatus = null
+          section.errorText = Protocol.nextRefreshError(
+            section.errorText, Protocol.responseFailure(cmd, response), false
+          )
           return
         }
-        section.streams = response.streams || []
-        section.rebuild()
-        controller.send("devices", {})
-
-        // A receiver waiting on a code opens the prompt on its own, so a
-        // connect started outside this panel can still finish here.
-        for (var i = 0; i < section.rows.length; i++) {
-          var row = section.rows[i]
-          if (row.needsCredential && section.credentialIp === "") {
-            section.openCredentialPrompt(row.ip, row.credentialKind)
-            break
-          }
+        section.stagedStatus = response
+        if (!controller.send("devices", {})) {
+          section.stagedStatus = null
+          section.errorText = Protocol.nextRefreshError(
+            section.errorText, "requestRejected", false
+          )
         }
         return
       }
 
       if (cmd === "devices") {
-        if (response !== null && response.ok) {
-          section.devices = response.devices || []
+        var statusResponse = section.stagedStatus
+        var snapshot = Protocol.refreshSnapshot(statusResponse, response)
+        section.stagedStatus = null
+        if (snapshot !== null) {
+          section.streams = snapshot.streams
+          section.devices = snapshot.devices
           section.rebuild()
+          var reported = Protocol.responseFailure("status", statusResponse)
+            || Protocol.responseFailure("devices", response)
+          section.errorText = Protocol.nextRefreshError(
+            section.errorText, reported, reported === ""
+          )
+
+          // A receiver waiting on a code opens the prompt on its own, so a
+          // connect started outside this panel can still finish here.
+          for (var i = 0; i < section.rows.length; i++) {
+            var row = section.rows[i]
+            if (row.needsCredential && section.credentialIp === "") {
+              section.openCredentialPrompt(row.ip, row.credentialKind)
+              break
+            }
+          }
+        } else {
+          var refreshFailure = failureKind
+            || Protocol.responseFailure(cmd, response)
+            || "malformedResponse"
+          section.errorText = Protocol.nextRefreshError(
+            section.errorText, refreshFailure, false
+          )
         }
         return
       }
 
       if (cmd === "discover") {
         section.discovering = false
-        if (response !== null && response.ok) {
-          if (response.devices) section.devices = response.devices
-          if (response.streams) section.streams = response.streams
-          section.rebuild()
-        } else {
-          section.errorText = Protocol.sanitizeError(cmd, response)
+        var discoveryFailure = failureKind || Protocol.responseFailure(cmd, response)
+        if (response === null && discoveryFailure === "") {
+          discoveryFailure = "socketClosed"
         }
+        if (discoveryFailure !== "") {
+          section.errorText = Protocol.nextRefreshError(
+            section.errorText, discoveryFailure, false
+          )
+        }
+        // Discovery updates the daemon's cache. Publish it only after the next
+        // complete status+devices transaction, never from this partial reply.
+        section.refresh()
         return
       }
 
@@ -346,20 +372,31 @@ Column {
       section.credentialSubmitted = false
 
       if (response === null) {
-        section.daemonUp = false
-        section.errorText = Protocol.sanitizeError(cmd, null)
+        if (failureKind === "socketUnavailable") section.daemonUp = false
+        section.errorText = Protocol.sanitizeError(
+          cmd, null, failureKind || "socketClosed"
+        )
         section.refresh()
         return
       }
 
       if (response.needs_credential || response.needs_pin) {
+        var requestedKind = response.credential_kind === "password"
+          ? "password"
+          : (response.credential_kind === "pin" ? "pin" : "")
+        if (requestedKind === "") {
+          section.errorText = Protocol.failureMessage("malformedResponse")
+          if (section.credentialIp === target) section.closeCredentialPrompt()
+          section.refresh()
+          return
+        }
         // Asking again immediately after a submission means it was rejected.
-        section.openCredentialPrompt(target, response.credential_kind || section.credentialKind)
+        section.openCredentialPrompt(target, requestedKind)
         if (submitted) {
           section.credentialRejected = true
           section.credentialText = ""
         }
-      } else if (!response.ok) {
+      } else if (Protocol.responseFailure(cmd, response) !== "") {
         section.errorText = Protocol.sanitizeError(cmd, response)
         if (section.credentialIp === target) section.closeCredentialPrompt()
       } else if (kind === "connect") {
@@ -437,6 +474,7 @@ Column {
       Text {
         id: airplayNote
         text: section.headerNote
+        textFormat: Text.PlainText
         visible: text !== ""
         color: Qt.darker(section.bar.foreground, 1.4)
         font.family: section.bar.fontFamily
@@ -453,6 +491,7 @@ Column {
       width: parent.width - Style.space(12)
       x: Style.space(6)
       text: section.emptyText
+      textFormat: Text.PlainText
       color: section.errorText !== "" ? section.bar.urgent : Qt.darker(section.bar.foreground, 1.5)
       font.family: section.bar.fontFamily
       font.pixelSize: Style.font.bodySmall
@@ -518,7 +557,9 @@ Column {
 
       PanelToolTip {
         visible: rowMouse.containsMouse && !deviceRow.promptOpen
-        text: deviceRow.row.streaming ? "Stop mirroring" : "Mirror to " + deviceRow.row.name
+        text: Airplay.safeShellText(
+          deviceRow.row.streaming ? "Stop mirroring" : "Mirror to " + deviceRow.row.name
+        )
         fontFamily: section.bar.fontFamily
       }
 
@@ -550,6 +591,7 @@ Column {
       Text {
         id: deviceIcon
         text: "󰠹"
+        textFormat: Text.PlainText
         color: deviceRow.statusColor
         font.family: section.bar.fontFamily
         font.pixelSize: Style.font.title
@@ -577,6 +619,7 @@ Column {
           visible: !menuButton.visible
           width: parent.width
           text: deviceRow.row.streaming && !deviceRow.isBusy ? "󰄬" : ""
+          textFormat: Text.PlainText
           color: section.bar.foreground
           font.family: section.bar.fontFamily
           font.pixelSize: Style.font.subtitle
@@ -608,6 +651,7 @@ Column {
 
         Text {
           text: deviceRow.row.name
+          textFormat: Text.PlainText
           color: section.bar.foreground
           font.family: section.bar.fontFamily
           font.pixelSize: Style.font.body
@@ -617,6 +661,7 @@ Column {
 
         Text {
           text: deviceRow.promptOpen ? "" : deviceRow.statusText
+          textFormat: Text.PlainText
           visible: text !== ""
           height: visible ? implicitHeight : 0
           color: deviceRow.statusColor
@@ -681,7 +726,7 @@ Column {
         Button {
           text: "Stop"
           iconText: "󰅙"
-          tooltipText: "Stop mirroring to " + deviceRow.row.name
+          tooltipText: Airplay.safeShellText("Stop mirroring to " + deviceRow.row.name)
           fontSize: Style.font.caption
           iconSize: Style.font.caption
           foreground: section.bar.foreground
@@ -750,6 +795,7 @@ Column {
           horizontalAlignment: Text.AlignHCenter
           verticalAlignment: Text.AlignVCenter
           text: "Pairing…"
+          textFormat: Text.PlainText
           color: section.bar.foreground
           font.family: section.bar.fontFamily
           font.pixelSize: Style.font.bodySmall

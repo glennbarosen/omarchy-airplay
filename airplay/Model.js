@@ -20,6 +20,14 @@ function friendlyModel(model) {
   return raw
 }
 
+// Text owned by this plugin is forced to Text.PlainText in QML. Shell-owned
+// components such as PanelHero and PanelToolTip do not expose that control, so
+// receiver-controlled strings lose the two characters required to form a rich
+// text tag before crossing that boundary.
+function safeShellText(value) {
+  return String(value || "").replace(/[<>]/g, "")
+}
+
 // Fold the daemon's device list together with its active streams so each row
 // carries everything a view needs without cross-referencing two arrays.
 function mergeDevices(devices, streams) {
@@ -51,6 +59,8 @@ function mergeDevices(devices, streams) {
 
 function rowFor(name, model, ip, port, stream, deviceId) {
   var state = stream ? String(stream.state || "") : "idle"
+  var credentialKind = stream ? String(stream.credential_kind || "") : ""
+  if (credentialKind !== "pin" && credentialKind !== "password") credentialKind = ""
   return {
     name: String(name || ip || "Unknown"),
     model: friendlyModel(model),
@@ -60,8 +70,8 @@ function rowFor(name, model, ip, port, stream, deviceId) {
     state: state,
     streaming: state === "streaming",
     connecting: state === "connecting" || state === "discovering",
-    needsCredential: state === "pin_required",
-    credentialKind: stream ? String(stream.credential_kind || "") : "",
+    needsCredential: state === "pin_required" && credentialKind !== "",
+    credentialKind: credentialKind,
     hasAudio: stream ? !!stream.has_audio : false,
     audioMuted: stream ? !!stream.audio_muted : false
   }

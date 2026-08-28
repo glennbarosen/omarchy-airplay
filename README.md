@@ -168,7 +168,16 @@ the code. The control path is intentionally small; here is what to look for:
   documented above.
 - **Control uses no subprocesses.** Status, discovery, connect/disconnect,
   credentials, mute/unmute and Source all use one-request/one-response JSON on
-  `$XDG_RUNTIME_DIR/doubletake.sock` (falling back to `/tmp/doubletake.sock`).
+  `$XDG_RUNTIME_DIR/doubletake.sock`. If that path is unavailable before a
+  request is written, the controller retries once at `/tmp/doubletake.sock`;
+  it never retries a payload that may already have reached the daemon.
+- **Refreshes are coherent and recover automatically.** A new status and device
+  list are published together, never mixed with a stale half. Sanitized
+  transport, protocol, discovery, request and stream errors remain visible
+  until a later complete automatic refresh succeeds.
+- **Receiver text cannot become QML rich text.** Plugin-owned labels force
+  `Text.PlainText`; angle brackets are removed before receiver-controlled names
+  cross into shell-owned hero and tooltip components.
 - **The plugin never reads or writes doubletake's credentials file.** Source
   reset is a targeted daemon request; credential ownership stays with
   doubletake.
@@ -182,6 +191,8 @@ the code. The control path is intentionally small; here is what to look for:
 - **The daemon is started on demand**, only when you open the panel or connect.
   Nothing runs at login unless you enable doubletake's systemd user unit
   yourself.
+
+Development check: `node --test tests/*.test.js`
 
 ## Limitations
 

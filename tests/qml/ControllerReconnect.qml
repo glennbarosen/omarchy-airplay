@@ -11,6 +11,9 @@ ShellRoot {
     readonly property string fixturePath: String(
       Quickshell.env("AIRPLAY_RECONNECT_FIXTURE") || ""
     )
+    readonly property string socketPath: String(
+      Quickshell.env("XDG_RUNTIME_DIR") || ""
+    ) + "/doubletake.sock"
 
     function fail(reason) {
       console.error("RECONNECT_FAIL " + reason)
@@ -20,6 +23,7 @@ ShellRoot {
 
     Airplay.Controller {
       id: controller
+      socketPathsOverride: [driver.socketPath]
 
       onAnswered: function (cmd, target, response) {
         if (driver.attempt === 1) {
@@ -47,7 +51,7 @@ ShellRoot {
 
     Process {
       id: fixture
-      command: ["node", driver.fixturePath, controller.path]
+      command: ["node", driver.fixturePath, driver.socketPath]
 
       stdout: SplitParser {
         splitMarker: "\n"

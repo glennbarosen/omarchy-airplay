@@ -95,7 +95,9 @@ Panel {
     // WidgetButton.active paints with bar.urgent, so a live stream reads as a
     // state on the icon rather than a different icon appearing in the bar.
     active: root.mirroring
-    tooltipText: root.mirroring ? airplaySection.heroText : "Screen Mirroring"
+    tooltipText: root.mirroring
+      ? Airplay.safeShellText(airplaySection.heroText)
+      : "Screen Mirroring"
     onPressed: function(b) { root.toggle() }
   }
 
@@ -140,12 +142,15 @@ Panel {
 
           PanelHero {
             title: "Screen Mirroring"
-            meta: airplaySection.heroText !== "" ? airplaySection.heroText : "Not mirroring"
+            meta: airplaySection.heroText !== ""
+              ? Airplay.safeShellText(airplaySection.heroText)
+              : "Not mirroring"
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
 
             iconComponent: Text {
               text: "󰠹"
+              textFormat: Text.PlainText
               color: root.bar.foreground
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.display

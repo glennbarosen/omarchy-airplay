@@ -36,6 +36,34 @@ test("socketPath strips a trailing slash instead of doubling the separator", () 
   );
 });
 
+test("socketPaths tries the runtime socket before the legacy fallback", () => {
+  assert.deepEqual(
+    Proto.socketPaths({ XDG_RUNTIME_DIR: "/run/user/1000" }),
+    ["/run/user/1000/doubletake.sock", "/tmp/doubletake.sock"]
+  );
+  assert.deepEqual(
+    Proto.socketPaths({ XDG_RUNTIME_DIR: "" }),
+    ["/tmp/doubletake.sock"]
+  );
+});
+
+test("socket fallback is allowed only before a payload reaches the runtime socket", () => {
+  const paths = ["/run/user/1000/doubletake.sock", "/tmp/doubletake.sock"];
+  assert.equal(
+    Proto.fallbackSocketPath(paths, "/run/user/1000/doubletake.sock", false),
+    "/tmp/doubletake.sock"
+  );
+  assert.equal(
+    Proto.fallbackSocketPath(paths, "/run/user/1000/doubletake.sock", true),
+    ""
+  );
+  assert.equal(Proto.fallbackSocketPath(paths, "/tmp/doubletake.sock", false), "");
+  assert.equal(
+    Proto.fallbackSocketPath(["/tmp/doubletake.sock"], "/tmp/doubletake.sock", false),
+    ""
+  );
+});
+
 test("socketPath never returns a relative or bare path", () => {
   for (const env of [{}, { XDG_RUNTIME_DIR: "relative/dir" }, { XDG_RUNTIME_DIR: "." }]) {
     const resolved = Proto.socketPath(env);
@@ -108,6 +136,74 @@ test("parseResponse keeps the arrays the panel renders from", () => {
 test("parseResponse rejects a response whose arrays are not arrays", () => {
   assert.equal(Proto.parseResponse('{"ok":true,"devices":{"nope":1}}'), null);
   assert.equal(Proto.parseResponse('{"ok":true,"streams":"nope"}'), null);
+});
+
+test("parseResponse rejects invalid required field types", () => {
+  for (const response of [
+    { ok: true, state: 7 },
+    { ok: true, state: "idle", error: 7 },
+    { ok: true, state: "idle", devices: [{ name: 7, model: "AppleTV14,1", ip: "192.0.2.10" }] },
+    { ok: true, state: "idle", devices: [{ name: "TV", model: false, ip: "192.0.2.10" }] },
+    { ok: true, state: "idle", devices: [{ name: "TV", model: "AppleTV14,1", ip: null }] },
+    { ok: true, state: "idle", streams: [{ device: "TV", device_ip: 7, state: "streaming" }] },
+    { ok: true, state: "idle", streams: [{ device: "TV", device_ip: "192.0.2.10", state: false }] },
+  ]) {
+    assert.equal(Proto.parseResponse(JSON.stringify(response)), null);
+  }
+});
+
+test("parseResponse tolerates omitted optional and unknown future fields", () => {
+  assert.deepEqual(
+    Proto.parseResponse(
+      '{"ok":true,"state":"future_state","future":{"enabled":true},"streams":[]}'
+    ),
+    { ok: true, state: "future_state", future: { enabled: true }, streams: [] }
+  );
+});
+
+test("refreshSnapshot publishes status and devices only as one complete result", () => {
+  const status = Proto.parseResponse(
+    '{"ok":true,"state":"streaming","streams":[{"device":"TV","device_ip":"192.0.2.10","state":"streaming"}]}'
+  );
+  const devices = Proto.parseResponse(
+    '{"ok":true,"state":"streaming","devices":[{"name":"TV","model":"AppleTV14,1","ip":"192.0.2.10"}]}'
+  );
+
+  assert.deepEqual(Proto.refreshSnapshot(status, devices), {
+    streams: status.streams,
+    devices: devices.devices,
+  });
+});
+
+test("refreshSnapshot refuses every partial or rejected refresh", () => {
+  const status = Proto.parseResponse('{"ok":true,"state":"idle","streams":[]}');
+  const devices = Proto.parseResponse('{"ok":true,"state":"idle","devices":[]}');
+  const rejected = Proto.parseResponse('{"ok":false,"state":"error","error":"nope"}');
+
+  assert.equal(Proto.refreshSnapshot(null, devices), null);
+  assert.equal(Proto.refreshSnapshot(status, null), null);
+  assert.equal(Proto.refreshSnapshot(rejected, devices), null);
+  assert.equal(Proto.refreshSnapshot(status, rejected), null);
+});
+
+test("a malformed second response cannot mix new streams with stale devices", () => {
+  const published = {
+    streams: [],
+    devices: [{ name: "Old TV", model: "AppleTV11,1", ip: "192.0.2.20" }],
+  };
+  const stagedStatus = Proto.parseResponse(
+    '{"ok":true,"state":"streaming","streams":[{"device":"New TV","device_ip":"192.0.2.10","state":"streaming"}]}'
+  );
+  const malformedDevices = Proto.parseResponse(
+    '{"ok":true,"state":"streaming","devices":"not-an-array"}'
+  );
+
+  const candidate = Proto.refreshSnapshot(stagedStatus, malformedDevices);
+  assert.equal(candidate, null);
+  assert.deepEqual(published, {
+    streams: [],
+    devices: [{ name: "Old TV", model: "AppleTV11,1", ip: "192.0.2.20" }],
+  });
 });
 
 // ---------------------------------------------------------- request construction
@@ -284,6 +380,7 @@ test("an unparseable response is a transport failure, not a daemon answer", () =
   assert.equal(result.accepted, true);
   assert.equal(result.response, null);
   assert.equal(result.transportFailed, true);
+  assert.equal(result.failureKind, "malformedResponse");
 });
 
 test("the credential is dropped from the pending request once a response lands", () => {
@@ -324,6 +421,58 @@ test("the request timeout is bounded and short enough to unstick the panel", () 
 
 // -------------------------------------------------------------- error sanitising
 
+test("failure categories are distinct, stable and contain no daemon detail", () => {
+  const kinds = [
+    "socketUnavailable",
+    "socketTimeout",
+    "socketClosed",
+    "malformedResponse",
+    "requestRejected",
+    "discoveryReported",
+    "streamReported",
+  ];
+  const messages = kinds.map((kind) => Proto.failureMessage(kind));
+  assert.equal(new Set(messages).size, kinds.length);
+  for (const message of messages) {
+    assert.equal(message.includes("\n"), false);
+    assert.equal(message.includes("1234"), false);
+    assert.ok(message.length <= 120);
+  }
+});
+
+test("responseFailure distinguishes request, discovery and stream failures", () => {
+  assert.equal(
+    Proto.responseFailure("connect", { ok: false, state: "error", error: "pin 1234" }),
+    "requestRejected"
+  );
+  assert.equal(
+    Proto.responseFailure("devices", { ok: true, state: "error", devices: [], error: "avahi detail" }),
+    "discoveryReported"
+  );
+  assert.equal(
+    Proto.responseFailure("status", {
+      ok: true,
+      state: "error",
+      streams: [{ device: "TV", device_ip: "192.0.2.10", state: "error" }],
+    }),
+    "streamReported"
+  );
+  assert.equal(
+    Proto.responseFailure("status", { ok: true, state: "idle", streams: [] }),
+    ""
+  );
+});
+
+test("refresh errors persist until one complete verified refresh succeeds", () => {
+  const requestError = Proto.failureMessage("requestRejected");
+  assert.equal(Proto.nextRefreshError(requestError, "", false), requestError);
+  assert.equal(
+    Proto.nextRefreshError(requestError, "socketTimeout", false),
+    Proto.failureMessage("socketTimeout")
+  );
+  assert.equal(Proto.nextRefreshError(requestError, "", true), "");
+});
+
 test("sanitizeError never repeats the daemon's raw text", () => {
   const raw =
     "dial unix /run/user/1000/doubletake.sock: connect: no such file; creds /home/glenn/.config/doubletake/credentials.json";
@@ -355,6 +504,25 @@ test("sanitizeError reports a transport failure without naming the socket", () =
   assert.ok(message.length > 0);
   assert.equal(message.includes("sock"), false);
   assert.match(message, /AirPlay service/i);
+});
+
+test("sanitizeError reports the controller's exact transport failure category", () => {
+  assert.equal(
+    Proto.sanitizeError("status", null, "socketUnavailable"),
+    Proto.failureMessage("socketUnavailable")
+  );
+  assert.equal(
+    Proto.sanitizeError("status", null, "socketTimeout"),
+    Proto.failureMessage("socketTimeout")
+  );
+  assert.equal(
+    Proto.sanitizeError("status", null, "socketClosed"),
+    Proto.failureMessage("socketClosed")
+  );
+  assert.equal(
+    Proto.sanitizeError("status", null, "malformedResponse"),
+    Proto.failureMessage("malformedResponse")
+  );
 });
 
 test("sanitizeError produces one short line, never a stack or a multi-line dump", () => {

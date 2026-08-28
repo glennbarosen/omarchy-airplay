@@ -216,7 +216,9 @@ re-implemented; only `DeviceRow` is defined by this plugin.
     not-installed / not-running / scanning / none-found / error.
   - *error* — `errorText` renders in that same slot in `bar.urgent`. A rejected
     credential instead re-opens the prompt with an urgent placeholder ("Wrong
-    code — try again") and a cleared field.
+    code — try again") and a cleared field. Transport, protocol, request,
+    discovery and stream failures have distinct sanitized copy. An error
+    remains until a later complete status-plus-devices refresh succeeds.
 - **Accessibility:** whole row is one click target with a `PanelToolTip`
   stating the outcome ("Stop mirroring" / "Mirror to <name>"). Keyboard: `j`/`k`
   move, Enter activates, Esc closes — routed from `PanelKeyCatcher` through the
@@ -265,6 +267,17 @@ re-implemented; only `DeviceRow` is defined by this plugin.
 | Panel open, idle | 3000ms |
 | Panel closed, stream live | 10000ms |
 | Panel closed, nothing live | not running |
+
+### Controller state contract
+
+- Each request owns a fresh socket transport and a five-second timeout.
+- The XDG runtime socket is tried first; `/tmp/doubletake.sock` is attempted
+  only after a pre-write connection failure, so a command is never duplicated.
+- A poll stages `status`, then publishes it only together with the validated
+  `devices` response. A failed second response leaves the previous rows intact.
+- A complete automatic refresh is the only path that clears a prior controller
+  error. Poll ticks coalesce while a request is busy, so failures cannot build a
+  request backlog.
 
 ### Rules
 
@@ -317,6 +330,9 @@ which mirrors Hyprland's `decoration:rounding` and is `0` on a square theme.
 - **Text-input mode is explicit:** while a credential prompt is open,
   `PanelKeyCatcher.blocked` stops navigation keys from being swallowed as
   commands, so typing a PIN can never move the cursor.
+- **Remote text is inert:** every plugin-owned `Text` uses `Text.PlainText`.
+  Receiver-controlled strings are stripped of angle brackets before they enter
+  shell-owned hero or tooltip components that do not expose `textFormat`.
 - **Contrast:** inherited from the active Omarchy theme's foreground/background
   pair. This plugin never lowers contrast below `Qt.darker(fg, 1.5)` for
   meaningful text, and never uses color as the *only* signal — streaming is
