@@ -119,8 +119,8 @@ Column {
 
   function discover() {
     if (!available || !daemonUp) return
+    if (!controller.send("discover", { interactive: true })) return
     section.discovering = true
-    if (!controller.send("discover", { interactive: true })) section.discovering = false
   }
 
   function connectTo(ip, port, code) {
@@ -171,13 +171,13 @@ Column {
   function submitCredential() {
     if (credentialIp === "") return
     if (!Airplay.credentialIsValid(credentialKind, credentialText)) return
-    section.credentialRejected = false
     var ip = section.credentialIp
     var port = 0
     for (var i = 0; i < rows.length; i++) {
       if (rows[i].ip === ip) { port = rows[i].port; break }
     }
     if (connectTo(ip, port, credentialText)) {
+      section.credentialRejected = false
       // Controller now owns either the active or queued request line. Drop the
       // UI copy; this is reference cleanup, not physical string zeroization.
       section.credentialText = ""

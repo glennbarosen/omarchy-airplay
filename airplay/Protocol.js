@@ -56,12 +56,31 @@ function socketPath(env) {
   return socketPaths(env)[0]
 }
 
+function normalizedSocketPath(path) {
+  if (typeof path !== "string" || path.charAt(0) !== "/") return ""
+  var parts = path.split("/")
+  var normalized = []
+  for (var i = 0; i < parts.length; i++) {
+    if (parts[i] === "" || parts[i] === ".") continue
+    if (parts[i] === "..") {
+      if (normalized.length > 0) normalized.pop()
+      continue
+    }
+    normalized.push(parts[i])
+  }
+  return "/" + normalized.join("/")
+}
+
+function isGlobalLegacySocket(path) {
+  return normalizedSocketPath(path) === "/tmp/" + SOCKET_NAME
+}
+
 function fallbackSocketPath(paths, currentPath, payloadWritten) {
   if (payloadWritten || !Array.isArray(paths)) return ""
   var index = paths.indexOf(currentPath)
   if (index < 0 || index + 1 >= paths.length) return ""
   var candidate = paths[index + 1]
-  if (candidate === "/tmp/" + SOCKET_NAME) return ""
+  if (isGlobalLegacySocket(candidate)) return ""
   return typeof candidate === "string" && candidate.charAt(0) === "/" ? candidate : ""
 }
 
@@ -69,7 +88,7 @@ function fallbackSocketPath(paths, currentPath, payloadWritten) {
 // line that is not exactly one terminated request both fail closed.
 function canWrite(path, line) {
   if (typeof path !== "string" || path.trim() === "" || path.charAt(0) !== "/") return false
-  if (path === "/tmp/" + SOCKET_NAME) return false
+  if (isGlobalLegacySocket(path)) return false
   if (typeof line !== "string" || line === "") return false
   if (line.charAt(line.length - 1) !== "\n") return false
   return line.indexOf("\n") === line.length - 1

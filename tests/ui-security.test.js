@@ -139,7 +139,7 @@ test("receiver names are sanitized before shell-owned labels and tooltips", () =
   for (const block of receiverControlled) {
     assert.match(
       block,
-      /Airplay\.safeShellText\s*\(/,
+      /Airplay(?:Model)?\.safeShellText\s*\(/,
       `receiver-controlled text reached a shell component unsanitized:\n${block}`
     );
   }

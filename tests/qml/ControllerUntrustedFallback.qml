@@ -22,7 +22,7 @@ ShellRoot {
 
     Airplay.Controller {
       id: controller
-      socketPathsOverride: [driver.primaryPath, "/tmp/doubletake.sock"]
+      socketPathsOverride: [driver.primaryPath, "/tmp/./doubletake.sock"]
 
       onAnswered: function (cmd, target, response, failureKind) {
         if (response !== null || failureKind !== "socketUnavailable") {

@@ -61,6 +61,22 @@ test("socket fallback rejects the globally claimable legacy path", () => {
   );
 });
 
+test("global tmp socket aliases are rejected after lexical normalization", () => {
+  const aliases = [
+    "/tmp/./doubletake.sock",
+    "/tmp//doubletake.sock",
+    "/run/../tmp/doubletake.sock",
+    "/tmp/private/../doubletake.sock",
+  ];
+  for (const alias of aliases) {
+    assert.equal(
+      Proto.fallbackSocketPath(["/run/user/1000/missing.sock", alias], "/run/user/1000/missing.sock", false),
+      ""
+    );
+    assert.equal(Proto.canWrite(alias, '{"cmd":"connect","pin":"1234"}\n'), false);
+  }
+});
+
 test("socketPath never returns a relative or bare path", () => {
   for (const env of [
     { XDG_RUNTIME_DIR: "/run/user/1000" },
