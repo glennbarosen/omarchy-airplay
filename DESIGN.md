@@ -271,8 +271,8 @@ re-implemented; only `DeviceRow` is defined by this plugin.
 ### Controller state contract
 
 - Each request owns a fresh socket transport and a five-second timeout.
-- The XDG runtime socket is tried first; `/tmp/doubletake.sock` is attempted
-  only after a pre-write connection failure, so a command is never duplicated.
+- Only the protected XDG runtime socket is used. The controller never attempts
+  `/tmp/doubletake.sock` and never duplicates a command after a write.
 - A poll stages `status`, then publishes it only together with the validated
   `devices` response. A failed second response leaves the previous rows intact.
 - A complete automatic refresh is the only path that clears a prior controller

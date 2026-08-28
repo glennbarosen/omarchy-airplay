@@ -65,6 +65,13 @@ ShellRoot {
             interactive: true
           })) {
             driver.fail("credential request was not queued")
+            return
+          }
+          if (controller.send("disconnect", {
+            target: "192.0.2.11",
+            interactive: true
+          })) {
+            driver.fail("interactive request queued behind another interactive request")
           }
         }
       }

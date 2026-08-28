@@ -4,7 +4,7 @@ import Quickshell
 import qs.Ui
 import qs.Commons
 import "airplay"
-import "airplay/Model.js" as Airplay
+import "airplay/Model.js" as AirplayModel
 
 // Standalone bar widget: a receiver list that mirrors this desktop over
 // AirPlay. All of the behaviour lives in airplay/Section.qml; this file is
@@ -96,7 +96,7 @@ Panel {
     // state on the icon rather than a different icon appearing in the bar.
     active: root.mirroring
     tooltipText: root.mirroring
-      ? Airplay.safeShellText(airplaySection.heroText)
+      ? AirplayModel.safeShellText(airplaySection.heroText)
       : "Screen Mirroring"
     onPressed: function(b) { root.toggle() }
   }
@@ -143,7 +143,7 @@ Panel {
           PanelHero {
             title: "Screen Mirroring"
             meta: airplaySection.heroText !== ""
-              ? Airplay.safeShellText(airplaySection.heroText)
+              ? AirplayModel.safeShellText(airplaySection.heroText)
               : "Not mirroring"
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily

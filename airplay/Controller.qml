@@ -33,7 +33,7 @@ Item {
 
   // Emitted once per request. `response` is the parsed daemon object, or null
   // when nothing usable came back; `cmd` and `target` identify what was asked.
-  signal answered(string cmd, string target, var response, string failureKind)
+  signal answered(string cmd, string target, var response, string failureKind, bool submitted)
 
   readonly property bool busy: pending !== null
 
@@ -67,10 +67,13 @@ Item {
     request.socketPaths = Array.prototype.slice.call(controller.paths)
     request.socketPath = request.socketPaths.length > 0 ? request.socketPaths[0] : ""
     request.payloadWritten = false
+    request.interactive = !!(options && options.interactive === true)
     if (!Protocol.canWrite(request.socketPath, request.line)) return false
 
     if (controller.pending !== null) {
-      if (!options || options.interactive !== true || controller.queuedInteractive !== null) {
+      if (!request.interactive
+          || controller.pending.interactive === true
+          || controller.queuedInteractive !== null) {
         Protocol.finishRequest(request)
         return false
       }
@@ -108,7 +111,7 @@ Item {
     var fallback = Protocol.fallbackSocketPath(
       request.socketPaths, request.socketPath, request.payloadWritten
     )
-    if (fallback === "") return false
+    if (fallback === "" || !Protocol.canWrite(fallback, request.line)) return false
 
     controller.transport = null
     failedTransport.started = false
@@ -127,6 +130,7 @@ Item {
 
     var cmd = request.cmd
     var target = request.target
+    var submitted = request.submitted
     Protocol.finishRequest(request)
     controller.pending = null
 
@@ -141,7 +145,7 @@ Item {
     var queued = controller.queuedInteractive
     controller.queuedInteractive = null
     if (queued !== null) controller.startRequest(queued)
-    controller.answered(cmd, target, response, String(failureKind || ""))
+    controller.answered(cmd, target, response, String(failureKind || ""), submitted)
   }
 
   function settleForGeneration(expectedGeneration, response, failureKind) {

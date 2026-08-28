@@ -169,8 +169,9 @@ the code. The control path is intentionally small; here is what to look for:
 - **Control uses no subprocesses.** Status, discovery, connect/disconnect,
   credentials, mute/unmute and Source all use one-request/one-response JSON on
   `$XDG_RUNTIME_DIR/doubletake.sock`. If that path is unavailable before a
-  request is written, the controller retries once at `/tmp/doubletake.sock`;
-  it never retries a payload that may already have reached the daemon.
+  request is written, the controller fails closed; it never sends credentials
+  to the globally claimable legacy `/tmp/doubletake.sock`, and it never retries
+  a payload that may already have reached the daemon.
 - **Refreshes are coherent and recover automatically.** A new status and device
   list are published together, never mixed with a stale half. Sanitized
   transport, protocol, discovery, request and stream errors remain visible

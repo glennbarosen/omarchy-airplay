@@ -125,43 +125,32 @@ Column {
 
   function connectTo(ip, port, code) {
     if (!available || ip === "") return false
+    var options = { target: ip, port: port, interactive: true }
+    if (code && String(code).length > 0) options.pin = String(code)
+    if (!controller.send("connect", options)) return false
     section.busyIp = ip
     section.busyKind = "connect"
-    var options = { target: ip, port: port, interactive: true }
-    if (code && String(code).length > 0) {
-      options.pin = String(code)
-      section.credentialSubmitted = true
-    }
-    if (!controller.send("connect", options)) {
-      section.busyIp = ""
-      section.busyKind = ""
-      section.credentialSubmitted = false
-      return false
-    }
+    section.credentialSubmitted = options.pin !== undefined
     return true
   }
 
   function disconnectFrom(ip) {
     if (!available) return
+    var options = ip === "" ? { interactive: true } : { target: ip, interactive: true }
+    if (!controller.send("disconnect", options)) return
     section.busyIp = ip
     section.busyKind = "disconnect"
-    var options = ip === "" ? { interactive: true } : { target: ip, interactive: true }
-    if (!controller.send("disconnect", options)) {
-      section.busyIp = ""
-      section.busyKind = ""
-    }
   }
 
   function disconnectAll() {
     if (!available) return
+    var target = ""
     for (var i = 0; i < rows.length; i++) {
-      if (rows[i].streaming) { section.busyIp = rows[i].ip; break }
+      if (rows[i].streaming) { target = rows[i].ip; break }
     }
+    if (!controller.send("disconnect", { interactive: true })) return
+    section.busyIp = target
     section.busyKind = "disconnect"
-    if (!controller.send("disconnect", { interactive: true })) {
-      section.busyIp = ""
-      section.busyKind = ""
-    }
   }
 
   function openCredentialPrompt(ip, kind) {
@@ -203,13 +192,10 @@ Column {
 
   function setMuted(ip, muted) {
     if (!available) return
+    var cmd = muted ? "mute" : "unmute"
+    if (!controller.send(cmd, { target: ip, interactive: true })) return
     section.busyIp = ip
     section.busyKind = "mute"
-    var cmd = muted ? "mute" : "unmute"
-    if (!controller.send(cmd, { target: ip, interactive: true })) {
-      section.busyIp = ""
-      section.busyKind = ""
-    }
   }
 
   // doubletake owns the credential database and capture lifecycle. Resetting
@@ -218,13 +204,10 @@ Column {
   // reads or mutates the credential file itself.
   function resetSource(ip) {
     if (!available || ip === "") return
+    if (!controller.send("reset-restore-token", { target: ip, interactive: true })) return
     section.menuIp = ""
     section.busyIp = ip
     section.busyKind = "connect"
-    if (!controller.send("reset-restore-token", { target: ip, interactive: true })) {
-      section.busyIp = ""
-      section.busyKind = ""
-    }
   }
 
   // Enter / click on a row. One target, one meaning: toggle this receiver.
@@ -275,7 +258,7 @@ Column {
   Controller {
     id: controller
 
-    onAnswered: function (cmd, target, response, failureKind) {
+    onAnswered: function (cmd, target, response, failureKind, submitted) {
       if (cmd === "status") {
         if (response === null) {
           section.stagedStatus = null
@@ -310,9 +293,11 @@ Column {
         section.stagedStatus = response
         if (!controller.send("devices", {})) {
           section.stagedStatus = null
-          section.errorText = Protocol.nextRefreshError(
-            section.errorText, "requestRejected", false
-          )
+          if (!controller.busy) {
+            section.errorText = Protocol.nextRefreshError(
+              section.errorText, "requestRejected", false
+            )
+          }
         }
         return
       }
@@ -369,7 +354,6 @@ Column {
       }
 
       var kind = section.busyKind
-      var submitted = section.credentialSubmitted
       section.busyIp = ""
       section.busyKind = ""
       section.credentialSubmitted = false

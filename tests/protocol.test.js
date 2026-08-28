@@ -44,11 +44,11 @@ test("socketPaths exposes only the protected runtime socket", () => {
   assert.deepEqual(Proto.socketPaths({ XDG_RUNTIME_DIR: "" }), []);
 });
 
-test("socket fallback is allowed only before a payload reaches the runtime socket", () => {
+test("socket fallback rejects the globally claimable legacy path", () => {
   const paths = ["/run/user/1000/doubletake.sock", "/tmp/doubletake.sock"];
   assert.equal(
     Proto.fallbackSocketPath(paths, "/run/user/1000/doubletake.sock", false),
-    "/tmp/doubletake.sock"
+    ""
   );
   assert.equal(
     Proto.fallbackSocketPath(paths, "/run/user/1000/doubletake.sock", true),

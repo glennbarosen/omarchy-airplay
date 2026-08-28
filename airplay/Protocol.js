@@ -61,6 +61,7 @@ function fallbackSocketPath(paths, currentPath, payloadWritten) {
   var index = paths.indexOf(currentPath)
   if (index < 0 || index + 1 >= paths.length) return ""
   var candidate = paths[index + 1]
+  if (candidate === "/tmp/" + SOCKET_NAME) return ""
   return typeof candidate === "string" && candidate.charAt(0) === "/" ? candidate : ""
 }
 
