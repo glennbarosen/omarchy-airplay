@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import Quickshell
 import Quickshell.Io
@@ -44,6 +46,12 @@ Item {
 
   property var pending: null
   property int generation: 0
+  property var transport: null
+
+  function requestForGeneration(expectedGeneration) {
+    var request = controller.pending
+    return request !== null && request.generation === expectedGeneration ? request : null
+  }
 
   // Sends one command. Returns false when the request was refused before it
   // could be written — an unknown command, a malformed target, a path that did
@@ -58,8 +66,17 @@ Item {
 
     controller.pending = request
     timeout.restart()
-    socket.path = controller.path
-    socket.connected = true
+    var candidate = socketComponent.createObject(controller, {
+      path: controller.path,
+      requestGeneration: request.generation
+    })
+    controller.transport = candidate
+    Qt.callLater(function () {
+      if (controller.requestForGeneration(request.generation) === null
+          || controller.transport !== candidate) return
+      candidate.started = true
+      candidate.connected = true
+    })
     return true
   }
 
@@ -75,49 +92,83 @@ Item {
     controller.pending = null
 
     timeout.stop()
-    socket.connected = false
+    var finishedTransport = controller.transport
+    controller.transport = null
+    if (finishedTransport !== null) {
+      finishedTransport.connected = false
+      finishedTransport.destroy()
+    }
 
     controller.answered(cmd, target, response)
   }
 
-  Socket {
-    id: socket
-
-    onConnectionStateChanged: {
-      if (connected) {
-        var request = controller.pending
-        if (request === null || request.done) {
-          socket.connected = false
-          return
-        }
-        // Written and flushed in the same turn: the daemon reads one line and
-        // will not answer until it has one.
-        socket.write(request.line)
-        socket.flush()
-        // The line was the only copy of the credential; the request stays in
-        // flight but the secret is gone from this process.
-        Protocol.clearCredential(request)
-      } else if (controller.pending !== null) {
-        // Closed before the answer arrived.
-        controller.settle(null)
-      }
-    }
-
-    parser: SplitParser {
-      splitMarker: "\n"
-      onRead: function (line) {
-        var request = controller.pending
-        if (request === null) return
-        var result = Protocol.acceptResponse(request, controller.generation, line)
-        if (!result.accepted) return
-        controller.settle(result.response)
-      }
-    }
+  function settleForGeneration(expectedGeneration, response) {
+    if (controller.requestForGeneration(expectedGeneration) === null) return
+    controller.settle(response)
   }
 
-  Connections {
-    target: socket
-    function onError() { controller.settle(null) }
+  // Quickshell 0.3.x retains a failed QLocalSocket after an initial
+  // ServerNotFoundError, and its public properties cannot make that wrapper
+  // reconnect. A fresh transport per request also matches doubletake's
+  // one-request-per-connection protocol and makes every terminal path dispose
+  // the poisoned native socket rather than carrying it into later work.
+  Component {
+    id: socketComponent
+
+    Item {
+      id: requestTransport
+      visible: false
+
+      property alias path: socket.path
+      property alias connected: socket.connected
+      property int requestGeneration: -1
+      property bool started: false
+
+      Socket {
+        id: socket
+
+        onConnectionStateChanged: {
+          if (connected) {
+            var request = controller.requestForGeneration(requestTransport.requestGeneration)
+            if (request === null || request.done) {
+              socket.connected = false
+              return
+            }
+            // Written and flushed in the same turn: the daemon reads one line and
+            // will not answer until it has one.
+            socket.write(request.line)
+            socket.flush()
+            // The line was the only copy of the credential; the request stays in
+            // flight but the secret is gone from this process.
+            Protocol.clearCredential(request)
+          } else if (requestTransport.started) {
+            controller.settleForGeneration(requestTransport.requestGeneration, null)
+          }
+        }
+
+        parser: SplitParser {
+          splitMarker: "\n"
+          onRead: function (line) {
+            var request = controller.requestForGeneration(requestTransport.requestGeneration)
+            if (request === null) return
+            var result = Protocol.acceptResponse(
+              request, requestTransport.requestGeneration, line
+            )
+            if (!result.accepted) return
+            controller.settleForGeneration(
+              requestTransport.requestGeneration, result.response
+            )
+          }
+        }
+      }
+
+      Connections {
+        target: socket
+        function onError() {
+          controller.settleForGeneration(requestTransport.requestGeneration, null)
+        }
+      }
+    }
   }
 
   // A daemon that accepts the connection and then says nothing must not wedge
@@ -135,5 +186,10 @@ Item {
   Component.onDestruction: {
     Protocol.abortRequest(controller.pending, "destroyed")
     controller.pending = null
+    if (controller.transport !== null) {
+      controller.transport.connected = false
+      controller.transport.destroy()
+      controller.transport = null
+    }
   }
 }
