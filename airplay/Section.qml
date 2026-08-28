@@ -118,16 +118,16 @@ Column {
   }
 
   function discover() {
-    if (!available || !daemonUp || controller.busy) return
+    if (!available || !daemonUp) return
     section.discovering = true
-    if (!controller.send("discover", {})) section.discovering = false
+    if (!controller.send("discover", { interactive: true })) section.discovering = false
   }
 
   function connectTo(ip, port, code) {
-    if (!available || ip === "" || controller.busy) return
+    if (!available || ip === "") return false
     section.busyIp = ip
     section.busyKind = "connect"
-    var options = { target: ip, port: port }
+    var options = { target: ip, port: port, interactive: true }
     if (code && String(code).length > 0) {
       options.pin = String(code)
       section.credentialSubmitted = true
@@ -136,14 +136,16 @@ Column {
       section.busyIp = ""
       section.busyKind = ""
       section.credentialSubmitted = false
+      return false
     }
+    return true
   }
 
   function disconnectFrom(ip) {
-    if (!available || controller.busy) return
+    if (!available) return
     section.busyIp = ip
     section.busyKind = "disconnect"
-    var options = ip === "" ? {} : { target: ip }
+    var options = ip === "" ? { interactive: true } : { target: ip, interactive: true }
     if (!controller.send("disconnect", options)) {
       section.busyIp = ""
       section.busyKind = ""
@@ -151,12 +153,12 @@ Column {
   }
 
   function disconnectAll() {
-    if (!available || controller.busy) return
+    if (!available) return
     for (var i = 0; i < rows.length; i++) {
       if (rows[i].streaming) { section.busyIp = rows[i].ip; break }
     }
     section.busyKind = "disconnect"
-    if (!controller.send("disconnect", {})) {
+    if (!controller.send("disconnect", { interactive: true })) {
       section.busyIp = ""
       section.busyKind = ""
     }
@@ -186,10 +188,11 @@ Column {
     for (var i = 0; i < rows.length; i++) {
       if (rows[i].ip === ip) { port = rows[i].port; break }
     }
-    connectTo(ip, port, credentialText)
-    // Controller owns the socket write buffer now. Drop the UI copy
-    // immediately; this is reference cleanup, not physical string zeroization.
-    section.credentialText = ""
+    if (connectTo(ip, port, credentialText)) {
+      // Controller now owns either the active or queued request line. Drop the
+      // UI copy; this is reference cleanup, not physical string zeroization.
+      section.credentialText = ""
+    }
   }
 
   function toggleMenu(ip) {
@@ -199,11 +202,11 @@ Column {
   }
 
   function setMuted(ip, muted) {
-    if (!available || controller.busy) return
+    if (!available) return
     section.busyIp = ip
     section.busyKind = "mute"
     var cmd = muted ? "mute" : "unmute"
-    if (!controller.send(cmd, { target: ip })) {
+    if (!controller.send(cmd, { target: ip, interactive: true })) {
       section.busyIp = ""
       section.busyKind = ""
     }
@@ -214,11 +217,11 @@ Column {
   // it safely and brings the portal's source picker back; this plugin never
   // reads or mutates the credential file itself.
   function resetSource(ip) {
-    if (!available || controller.busy || ip === "") return
+    if (!available || ip === "") return
     section.menuIp = ""
     section.busyIp = ip
     section.busyKind = "connect"
-    if (!controller.send("reset-restore-token", { target: ip })) {
+    if (!controller.send("reset-restore-token", { target: ip, interactive: true })) {
       section.busyIp = ""
       section.busyKind = ""
     }

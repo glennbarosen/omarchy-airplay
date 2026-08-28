@@ -37,9 +37,8 @@ Item {
 
   readonly property bool busy: pending !== null
 
-  // Production tries the XDG runtime socket first and the legacy /tmp path
-  // only when the first connection fails before a payload is written. Tests
-  // may supply two isolated absolute paths instead of touching the real /tmp.
+  // Production uses only the current user's protected XDG runtime socket.
+  // Tests may supply two isolated absolute paths to exercise transport retry.
   property var socketPathsOverride: null
   readonly property var paths: socketPathsOverride !== null
     ? socketPathsOverride
@@ -49,6 +48,7 @@ Item {
   readonly property string path: paths.length > 0 ? paths[0] : ""
 
   property var pending: null
+  property var queuedInteractive: null
   property int generation: 0
   property var transport: null
 
@@ -61,8 +61,6 @@ Item {
   // could be written — an unknown command, a malformed target, a path that did
   // not resolve, or a request already in flight.
   function send(cmd, options) {
-    if (controller.pending !== null) return false
-
     controller.generation += 1
     var request = Protocol.beginRequest(controller.generation, cmd, options)
     if (request === null) return false
@@ -71,10 +69,23 @@ Item {
     request.payloadWritten = false
     if (!Protocol.canWrite(request.socketPath, request.line)) return false
 
+    if (controller.pending !== null) {
+      if (!options || options.interactive !== true || controller.queuedInteractive !== null) {
+        Protocol.finishRequest(request)
+        return false
+      }
+      controller.queuedInteractive = request
+      return true
+    }
+
+    controller.startRequest(request)
+    return true
+  }
+
+  function startRequest(request) {
     controller.pending = request
     timeout.restart()
     controller.openTransport(request)
-    return true
   }
 
   function openTransport(request) {
@@ -127,6 +138,9 @@ Item {
       finishedTransport.destroy()
     }
 
+    var queued = controller.queuedInteractive
+    controller.queuedInteractive = null
+    if (queued !== null) controller.startRequest(queued)
     controller.answered(cmd, target, response, String(failureKind || ""))
   }
 
@@ -236,7 +250,9 @@ Item {
 
   Component.onDestruction: {
     Protocol.abortRequest(controller.pending, "destroyed")
+    Protocol.abortRequest(controller.queuedInteractive, "destroyed")
     controller.pending = null
+    controller.queuedInteractive = null
     if (controller.transport !== null) {
       controller.transport.connected = false
       controller.transport.destroy()

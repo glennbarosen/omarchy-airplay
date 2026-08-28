@@ -22,11 +22,11 @@ test("socketPath prefers XDG_RUNTIME_DIR", () => {
   );
 });
 
-test("socketPath falls back to /tmp when XDG_RUNTIME_DIR is absent, empty or blank", () => {
-  assert.equal(Proto.socketPath({}), "/tmp/doubletake.sock");
-  assert.equal(Proto.socketPath({ XDG_RUNTIME_DIR: "" }), "/tmp/doubletake.sock");
-  assert.equal(Proto.socketPath({ XDG_RUNTIME_DIR: "   " }), "/tmp/doubletake.sock");
-  assert.equal(Proto.socketPath(null), "/tmp/doubletake.sock");
+test("socketPath fails closed when XDG_RUNTIME_DIR is unavailable", () => {
+  assert.equal(Proto.socketPath({}), undefined);
+  assert.equal(Proto.socketPath({ XDG_RUNTIME_DIR: "" }), undefined);
+  assert.equal(Proto.socketPath({ XDG_RUNTIME_DIR: "   " }), undefined);
+  assert.equal(Proto.socketPath(null), undefined);
 });
 
 test("socketPath strips a trailing slash instead of doubling the separator", () => {
@@ -36,15 +36,12 @@ test("socketPath strips a trailing slash instead of doubling the separator", () 
   );
 });
 
-test("socketPaths tries the runtime socket before the legacy fallback", () => {
+test("socketPaths exposes only the protected runtime socket", () => {
   assert.deepEqual(
     Proto.socketPaths({ XDG_RUNTIME_DIR: "/run/user/1000" }),
-    ["/run/user/1000/doubletake.sock", "/tmp/doubletake.sock"]
+    ["/run/user/1000/doubletake.sock"]
   );
-  assert.deepEqual(
-    Proto.socketPaths({ XDG_RUNTIME_DIR: "" }),
-    ["/tmp/doubletake.sock"]
-  );
+  assert.deepEqual(Proto.socketPaths({ XDG_RUNTIME_DIR: "" }), []);
 });
 
 test("socket fallback is allowed only before a payload reaches the runtime socket", () => {
@@ -65,7 +62,10 @@ test("socket fallback is allowed only before a payload reaches the runtime socke
 });
 
 test("socketPath never returns a relative or bare path", () => {
-  for (const env of [{}, { XDG_RUNTIME_DIR: "relative/dir" }, { XDG_RUNTIME_DIR: "." }]) {
+  for (const env of [
+    { XDG_RUNTIME_DIR: "/run/user/1000" },
+    { XDG_RUNTIME_DIR: "/tmp/private-runtime" },
+  ]) {
     const resolved = Proto.socketPath(env);
     assert.ok(resolved.startsWith("/"), `expected absolute path, got ${resolved}`);
     assert.notEqual(resolved, "/doubletake.sock");
@@ -80,6 +80,10 @@ test("canWrite refuses an unresolved socket path", () => {
   assert.equal(Proto.canWrite("   ", '{"cmd":"status"}\n'), false);
   assert.equal(Proto.canWrite(null, '{"cmd":"status"}\n'), false);
   assert.equal(Proto.canWrite("doubletake.sock", '{"cmd":"status"}\n'), false);
+  assert.equal(
+    Proto.canWrite("/tmp/doubletake.sock", '{"cmd":"connect","pin":"1234"}\n'),
+    false
+  );
 });
 
 test("canWrite refuses an empty or unterminated request line", () => {

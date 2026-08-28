@@ -39,19 +39,17 @@ var HWACCELS = ["auto", "vaapi", "nvenc", "openh264", "none"]
 
 // ------------------------------------------------------------------ socket path
 
-// Prefer doubletake's XDG runtime socket, retaining its legacy /tmp socket as a
-// connection-time fallback. The fallback is attempted only before a payload is
-// written, so one command can never be delivered twice.
+// DoubleTake creates its control socket inside the current user's protected
+// XDG runtime directory. Never fall back to a globally claimable /tmp path:
+// connect requests may carry a receiver PIN or password.
 function socketPaths(env) {
   var dir = ""
   if (env && typeof env === "object" && typeof env.XDG_RUNTIME_DIR === "string") {
     dir = env.XDG_RUNTIME_DIR.trim()
   }
-  if (dir === "" || dir.charAt(0) !== "/") return ["/tmp/" + SOCKET_NAME]
+  if (dir === "" || dir.charAt(0) !== "/") return []
   while (dir.length > 1 && dir.charAt(dir.length - 1) === "/") dir = dir.slice(0, -1)
-  var runtimePath = dir + "/" + SOCKET_NAME
-  if (runtimePath === "/tmp/" + SOCKET_NAME) return [runtimePath]
-  return [runtimePath, "/tmp/" + SOCKET_NAME]
+  return [dir + "/" + SOCKET_NAME]
 }
 
 function socketPath(env) {
@@ -70,6 +68,7 @@ function fallbackSocketPath(paths, currentPath, payloadWritten) {
 // line that is not exactly one terminated request both fail closed.
 function canWrite(path, line) {
   if (typeof path !== "string" || path.trim() === "" || path.charAt(0) !== "/") return false
+  if (path === "/tmp/" + SOCKET_NAME) return false
   if (typeof line !== "string" || line === "") return false
   if (line.charAt(line.length - 1) !== "\n") return false
   return line.indexOf("\n") === line.length - 1
