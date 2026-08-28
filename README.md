@@ -9,7 +9,8 @@ receiver, done. Pairing happens inline — you never need a terminal.
 - Inline 4-digit PIN / password prompt for first-time pairing
 - A `⋯` menu on a live stream: change what's shared, mute audio, stop
 - The bar icon takes the active tint while mirroring
-- Full keyboard navigation (`j`/`k`, Enter, Esc), like the first-party panels
+- Keyboard navigation for receiver connect/stop and pairing (`j`/`k`, Enter,
+  Esc), like the first-party panels
 
 ## Requirements
 
@@ -31,7 +32,9 @@ vainfo | grep -i h264        # want VAProfileH264* : VAEntrypointEncSlice
 gst-inspect-1.0 vah264enc    # must resolve
 ```
 
-NVIDIA users want `nvenc` instead; see **Settings** below.
+NVIDIA users want `nvenc` instead; see **Settings** below. This release also
+requires a doubletake build whose daemon supports the `reset-restore-token`
+control command.
 
 Until doubletake is on your `PATH`, the panel shows an install hint instead of a
 device list. Nothing breaks.
@@ -77,25 +80,45 @@ asking. Credentials persist to `~/.config/doubletake/credentials.json`.
 | Key | Default | Meaning |
 |---|---|---|
 | `hwaccel` | `auto` | H.264 encoder passed to doubletake: `auto`, `vaapi`, `nvenc`, `openh264`, or `none` (software x264) |
+| `portRange` | `60000-60010` | Consecutive UDP ports doubletake may bind for receiver timing/audio; values must be within 1-65535 and contain at least 3 ports |
 
 ```json
-{ "id": "baro.airplay", "hwaccel": "vaapi" }
+{ "id": "baro.airplay", "hwaccel": "vaapi", "portRange": "60000-60010" }
 ```
 
-The value is whitelisted in QML before it ever reaches a command line.
+Both values are strictly parsed/whitelisted in QML before they reach the lazy
+daemon start. Invalid values fall back to their defaults; free-form setting text
+is never forwarded to argv.
+
+### Firewall
+
+The plugin **never edits your firewall** and never asks for elevated privileges.
+If UFW is active with default-deny incoming, allow the configured UDP range from
+your private LAN yourself. For example, replace the subnet with your actual
+private network:
+
+```bash
+sudo ufw allow from 192.168.1.0/24 to any port 60000:60010 proto udp comment 'doubletake AirPlay'
+sudo ufw status numbered
+```
+
+Keep the UFW range in sync with `portRange`. Do not expose these ports to the
+public internet.
 
 ## Changing what gets mirrored
 
-doubletake has **no runtime command to change the capture source**. The
-xdg-desktop-portal screencast session fixes it when the stream starts, and the
-`restore_token` saved in `credentials.json` makes every later connect reuse that
-same source — which is what makes reconnecting prompt-free.
+doubletake cannot switch an active portal capture in place. The
+xdg-desktop-portal screencast session fixes the source when the stream starts,
+and the `restore_token` saved in `credentials.json` makes every later connect
+reuse that same source — which is what makes reconnecting prompt-free.
 
-So **⋯ → Source** runs `airplay/reshare.sh`, which disconnects, removes *only*
-the `restore_token` key for that receiver, restarts the daemon (it caches
-credentials for the life of the process), and reconnects — landing you back in
-the portal's source picker. Pick a different monitor, window or region there,
-and don't tick "remember" if you expect to switch again soon.
+So **⋯ → Source** sends
+`{"cmd":"reset-restore-token","target":"<receiver IP>"}` directly to the
+daemon. doubletake owns the disconnect, targeted token reset and reconnect,
+landing you back in the portal's source picker. The plugin never reads or
+rewrites the credentials file and never signals/restarts the daemon for this
+action. Pick a different monitor, window or region there, and don't tick
+"remember" if you expect to switch again soon.
 
 The daemon's only other live controls are `mute` / `unmute`. Everything else —
 fps, bitrate, `-no-cursor` — is fixed when the daemon starts.
@@ -135,30 +158,42 @@ and merge upstream changes yourself, so keep the diff small and marked.
 ## Security
 
 Plugins run **unsandboxed inside your long-lived `omarchy-shell` process**. Read
-the code. It is four short files; here is what to look for:
+the code. The control path is intentionally small; here is what to look for:
 
-- **No network access of its own.** This plugin opens no sockets, fetches
-  nothing, and has no telemetry. All network activity belongs to doubletake.
-- **No install hooks, no sudo, no `curl | bash`.** Installing the backend is a
-  command you run yourself, documented above.
-- **Subprocesses it runs:** `doubletake-ctl` (status, devices, discover,
-  connect, disconnect, mute, unmute), `doubletake -daemonize` to start the
-  daemon on demand, one `sh -c 'command -v …'` probe, and `airplay/reshare.sh`.
-  Nothing else.
-- **`airplay/reshare.sh` writes to doubletake's credentials file.** This is the
-  one thing worth scrutinising, and the file explains itself at the top. It
-  removes only the `restore_token` key for a named receiver; the Ed25519 pairing
-  material is untouched. The device id and target are regex-validated, the
-  target file is refused if it is a symlink or not a regular file, the write is
-  atomic (temp file + `mv`, mode 600), and the result is rejected unless it is a
-  non-empty JSON object.
-- **Pairing codes are passed as an argv to `doubletake-ctl`**, so they are
-  briefly visible in `ps`. That is doubletake's CLI interface — it offers no
-  stdin path. For a one-time 4-digit code this is a small exposure; if your
-  receiver uses a fixed password, know that it applies there too.
+- **No network access of its own.** The plugin opens only doubletake's local
+  Unix control socket, fetches nothing, and has no telemetry. AirPlay network
+  activity belongs to doubletake.
+- **No install hooks, no sudo, no firewall mutation, no `curl | bash`.**
+  Installing the backend and configuring UFW are commands you run yourself,
+  documented above.
+- **Control uses no subprocesses.** Status, discovery, connect/disconnect,
+  credentials, mute/unmute and Source all use one-request/one-response JSON on
+  `$XDG_RUNTIME_DIR/doubletake.sock`. If that path is unavailable before a
+  request is written, the controller fails closed; it never sends credentials
+  to the globally claimable legacy `/tmp/doubletake.sock`, and it never retries
+  a payload that may already have reached the daemon.
+- **Refreshes are coherent and recover automatically.** A new status and device
+  list are published together, never mixed with a stale half. Sanitized
+  transport, protocol, discovery, request and stream errors remain visible
+  until a later complete automatic refresh succeeds.
+- **Receiver text cannot become QML rich text.** Plugin-owned labels force
+  `Text.PlainText`; angle brackets are removed before receiver-controlled names
+  cross into shell-owned hero and tooltip components.
+- **The plugin never reads or writes doubletake's credentials file.** Source
+  reset is a targeted daemon request; credential ownership stays with
+  doubletake.
+- **Pairing values never reach argv, a file or a log.** They exist in QML/JS
+  strings and one socket write buffer until references are dropped on write or
+  a terminal path. JavaScript strings are immutable and garbage-collected, so
+  this is scoped cleanup, not a claim of physical memory zeroization.
+- **Subprocess boundary:** one constant `command -v doubletake` availability
+  probe and `doubletake -daemonize` on first use, with only whitelisted
+  `hwaccel` and validated `portRange` settings. Nothing else.
 - **The daemon is started on demand**, only when you open the panel or connect.
   Nothing runs at login unless you enable doubletake's systemd user unit
   yourself.
+
+Development check: `node --test tests/*.test.js`
 
 ## Limitations
 
@@ -169,6 +204,16 @@ the code. It is four short files; here is what to look for:
 - The `⋯` menu is mouse-only. `j`/`k` reveals it but no key opens it yet.
 - Tested against an Apple TV 4K (3rd gen, `AppleTV14,1`) on tvOS 26.6. Other
   receivers depend entirely on doubletake's support.
+
+## Attribution
+
+The direct Unix-socket controller's one-request lifecycle, bounded cleanup and
+generation-guard approach reuse substantial implementation concepts from
+Mathias Ringhof's
+[omarchy-airplay](https://github.com/mathiasringhof/omarchy-airplay); thank you.
+The wire protocol and targeted restore-token semantics come from Omar Roth's
+[doubletake](https://github.com/omarroth/doubletake), licensed
+LGPL-3.0-or-later.
 
 ## License
 

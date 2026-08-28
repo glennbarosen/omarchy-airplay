@@ -1,19 +1,6 @@
-// Pure helpers for the AIRPLAY section. No QML imports, mirroring the style
-// of the panel's own Model.js so both are unit-testable by eye.
-
-// doubletake-ctl prints one indented JSON object per invocation. Anything
-// else (a socket error on stderr, a truncated read) parses to null so the
-// caller can distinguish "no daemon" from "daemon said no".
-function parseResponse(text) {
-  var raw = String(text || "").trim()
-  if (raw === "") return null
-  try {
-    var parsed = JSON.parse(raw)
-    return (parsed && typeof parsed === "object") ? parsed : null
-  } catch (e) {
-    return null
-  }
-}
+// Pure view-model helpers for the AIRPLAY section. No QML imports, mirroring
+// the style of the panel's own Model.js so the transformations stay easy to
+// inspect. Socket parsing and request validation live in Protocol.js.
 
 // "AppleTV14,1" -> "Apple TV 4K". Falls back to the raw model string, which
 // is still more informative than nothing for third-party receivers.
@@ -31,6 +18,14 @@ function friendlyModel(model) {
   if (/^Mac/i.test(raw)) return "Mac"
   if (/^AudioAccessory/i.test(raw)) return "HomePod"
   return raw
+}
+
+// Text owned by this plugin is forced to Text.PlainText in QML. Shell-owned
+// components such as PanelHero and PanelToolTip do not expose that control, so
+// receiver-controlled strings lose the two characters required to form a rich
+// text tag before crossing that boundary.
+function safeShellText(value) {
+  return String(value || "").replace(/[<>]/g, "")
 }
 
 // Fold the daemon's device list together with its active streams so each row
@@ -64,6 +59,8 @@ function mergeDevices(devices, streams) {
 
 function rowFor(name, model, ip, port, stream, deviceId) {
   var state = stream ? String(stream.state || "") : "idle"
+  var credentialKind = stream ? String(stream.credential_kind || "") : ""
+  if (credentialKind !== "pin" && credentialKind !== "password") credentialKind = ""
   return {
     name: String(name || ip || "Unknown"),
     model: friendlyModel(model),
@@ -73,8 +70,8 @@ function rowFor(name, model, ip, port, stream, deviceId) {
     state: state,
     streaming: state === "streaming",
     connecting: state === "connecting" || state === "discovering",
-    needsCredential: state === "pin_required",
-    credentialKind: stream ? String(stream.credential_kind || "") : "",
+    needsCredential: state === "pin_required" && credentialKind !== "",
+    credentialKind: credentialKind,
     hasAudio: stream ? !!stream.has_audio : false,
     audioMuted: stream ? !!stream.audio_muted : false
   }
