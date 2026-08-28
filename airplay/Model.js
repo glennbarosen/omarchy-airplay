@@ -1,19 +1,6 @@
-// Pure helpers for the AIRPLAY section. No QML imports, mirroring the style
-// of the panel's own Model.js so both are unit-testable by eye.
-
-// doubletake-ctl prints one indented JSON object per invocation. Anything
-// else (a socket error on stderr, a truncated read) parses to null so the
-// caller can distinguish "no daemon" from "daemon said no".
-function parseResponse(text) {
-  var raw = String(text || "").trim()
-  if (raw === "") return null
-  try {
-    var parsed = JSON.parse(raw)
-    return (parsed && typeof parsed === "object") ? parsed : null
-  } catch (e) {
-    return null
-  }
-}
+// Pure view-model helpers for the AIRPLAY section. No QML imports, mirroring
+// the style of the panel's own Model.js so the transformations stay easy to
+// inspect. Socket parsing and request validation live in Protocol.js.
 
 // "AppleTV14,1" -> "Apple TV 4K". Falls back to the raw model string, which
 // is still more informative than nothing for third-party receivers.

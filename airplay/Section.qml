@@ -4,12 +4,13 @@ import Quickshell.Io
 import qs.Ui
 import qs.Commons
 import "Model.js" as Airplay
+import "Protocol.js" as Protocol
 
 // The AIRPLAY block of the Display panel: receiver list, connect/disconnect,
-// and an inline PIN/password prompt. Everything talks to the doubletake
-// daemon through `doubletake-ctl`, which answers one JSON object per
-// invocation on stdout — so each command is a plain Process + StdioCollector,
-// the same shape the panel already uses for omarchy-monitor-state.
+// and an inline PIN/password prompt. All control operations use Controller.qml,
+// which writes one newline-delimited JSON request directly to doubletake's Unix
+// socket and reads one response. The only subprocesses left are a constant
+// binary-availability probe and the lazy `doubletake -daemonize` start.
 //
 // The panel that hosts this section owns the shared keyboard cursor
 // (cursorActive / focusSection / selectedIndex); rows only read it, exactly
@@ -61,15 +62,10 @@ Column {
   }
   readonly property string heroText: Airplay.heroMeta(rows)
 
-  // H.264 encoder handed to doubletake when this plugin starts it. Read from
-  // the widget's shell.json entry and whitelisted before it reaches argv,
-  // because "auto" is wrong often enough to be worth exposing but this value
-  // must never be free-form. Hosts that expose no settings get "auto".
-  readonly property string hwaccel: {
-    var raw = (panel && typeof panel.setting === "function") ? String(panel.setting("hwaccel", "auto")) : "auto"
-    var allowed = ["auto", "vaapi", "nvenc", "openh264", "none"]
-    return allowed.indexOf(raw) >= 0 ? raw : "auto"
-  }
+  // Settings are both whitelisted in Protocol.js before they reach argv. The
+  // port-range argument is rebuilt from parsed integers, never free-form text.
+  readonly property string hwaccelSetting: panelSetting("hwaccel", "auto")
+  readonly property string portRangeSetting: panelSetting("portRange", Protocol.DEFAULT_PORT_RANGE)
   readonly property bool panelOpen: panel ? panel.opened : false
 
   // Right-aligned caption beside the section header.
@@ -94,6 +90,10 @@ Column {
 
   // ---------------------------------------------------------------- actions
 
+  function panelSetting(name, fallback) {
+    return (panel && typeof panel.setting === "function") ? panel.setting(name, fallback) : fallback
+  }
+
   function rebuild() {
     section.rows = Airplay.sortRows(Airplay.mergeDevices(section.devices, section.streams))
   }
@@ -103,61 +103,66 @@ Column {
       if (!probeProc.running) probeProc.running = true
       return
     }
-    if (!available) return
-    if (!statusProc.running) statusProc.running = true
+    if (!available || controller.busy) return
+    controller.send("status", {})
   }
 
   // The daemon is started lazily, on the first open that needs it, so nothing
   // runs in the background until you actually reach for mirroring.
   function ensureDaemon() {
-    if (!available || daemonStarting || daemonFailed || !panelOpen) return
-    // reshare.sh stops and restarts the daemon itself; spawning a second one
-    // underneath it would fight for the socket.
-    if (actionProc.running) return
+    if (!available || daemonStarting || daemonFailed || !panelOpen || controller.busy) return
     section.errorText = ""
     section.daemonAttempts = 0
     section.daemonStarting = true
-    Quickshell.execDetached(["doubletake", "-daemonize", "-hwaccel", section.hwaccel])
+    Quickshell.execDetached(Protocol.daemonCommand(section.hwaccelSetting, section.portRangeSetting))
   }
 
   function discover() {
-    if (!available || !daemonUp || discoverProc.running) return
+    if (!available || !daemonUp || controller.busy) return
     section.discovering = true
-    discoverProc.running = true
+    if (!controller.send("discover", {})) section.discovering = false
   }
 
-  function connectTo(ip, code) {
-    if (!available || ip === "" || actionProc.running) return
+  function connectTo(ip, port, code) {
+    if (!available || ip === "" || controller.busy) return
     section.errorText = ""
     section.busyIp = ip
     section.busyKind = "connect"
-    var cmd = ["doubletake-ctl", "connect", ip]
+    var options = { target: ip, port: port }
     if (code && String(code).length > 0) {
-      cmd.push(String(code))
+      options.pin = String(code)
       section.credentialSubmitted = true
     }
-    actionProc.command = cmd
-    actionProc.running = true
+    if (!controller.send("connect", options)) {
+      section.busyIp = ""
+      section.busyKind = ""
+      section.credentialSubmitted = false
+    }
   }
 
   function disconnectFrom(ip) {
-    if (!available || actionProc.running) return
+    if (!available || controller.busy) return
     section.errorText = ""
     section.busyIp = ip
     section.busyKind = "disconnect"
-    actionProc.command = ip === "" ? ["doubletake-ctl", "disconnect"] : ["doubletake-ctl", "disconnect", ip]
-    actionProc.running = true
+    var options = ip === "" ? {} : { target: ip }
+    if (!controller.send("disconnect", options)) {
+      section.busyIp = ""
+      section.busyKind = ""
+    }
   }
 
   function disconnectAll() {
-    if (!available || actionProc.running) return
+    if (!available || controller.busy) return
     for (var i = 0; i < rows.length; i++) {
       if (rows[i].streaming) { section.busyIp = rows[i].ip; break }
     }
     section.errorText = ""
     section.busyKind = "disconnect"
-    actionProc.command = ["doubletake-ctl", "disconnect"]
-    actionProc.running = true
+    if (!controller.send("disconnect", {})) {
+      section.busyIp = ""
+      section.busyKind = ""
+    }
   }
 
   function openCredentialPrompt(ip, kind) {
@@ -179,7 +184,15 @@ Column {
     if (credentialIp === "") return
     if (!Airplay.credentialIsValid(credentialKind, credentialText)) return
     section.credentialRejected = false
-    connectTo(credentialIp, credentialText)
+    var ip = section.credentialIp
+    var port = 0
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].ip === ip) { port = rows[i].port; break }
+    }
+    connectTo(ip, port, credentialText)
+    // Controller owns the socket write buffer now. Drop the UI copy
+    // immediately; this is reference cleanup, not physical string zeroization.
+    section.credentialText = ""
   }
 
   function toggleMenu(ip) {
@@ -189,33 +202,30 @@ Column {
   }
 
   function setMuted(ip, muted) {
-    if (!available || actionProc.running) return
+    if (!available || controller.busy) return
     section.busyIp = ip
     section.busyKind = "mute"
-    actionProc.command = ["doubletake-ctl", muted ? "mute" : "unmute", ip]
-    actionProc.running = true
+    var cmd = muted ? "mute" : "unmute"
+    if (!controller.send(cmd, { target: ip })) {
+      section.busyIp = ""
+      section.busyKind = ""
+    }
   }
 
-  // doubletake has no runtime "change source" command — the portal picks the
-  // source once per session and the saved restore token makes every later
-  // connect reuse it silently. reshare.sh forgets just that token and cycles
-  // the daemon, which brings the portal's picker back.
-  function reshare(ip, deviceId) {
-    if (!available || actionProc.running) return
-    if (deviceId === "") {
-      section.errorText = "This receiver has no saved pairing to re-share from."
-      return
-    }
+  // doubletake owns the credential database and capture lifecycle. Resetting
+  // one live target's restore token through the daemon disconnects/reconnects
+  // it safely and brings the portal's source picker back; this plugin never
+  // reads or mutates the credential file itself.
+  function resetSource(ip) {
+    if (!available || controller.busy || ip === "") return
     section.menuIp = ""
     section.errorText = ""
     section.busyIp = ip
     section.busyKind = "connect"
-    actionProc.command = [section.helperPath("reshare.sh"), deviceId, ip, section.hwaccel]
-    actionProc.running = true
-  }
-
-  function helperPath(name) {
-    return String(Qt.resolvedUrl(name)).replace(/^file:\/\//, "")
+    if (!controller.send("reset-restore-token", { target: ip })) {
+      section.busyIp = ""
+      section.busyKind = ""
+    }
   }
 
   // Enter / click on a row. One target, one meaning: toggle this receiver.
@@ -225,7 +235,7 @@ Column {
     if (section.credentialIp === row.ip) { submitCredential(); return }
     if (row.streaming) { disconnectFrom(row.ip); return }
     if (row.needsCredential) { openCredentialPrompt(row.ip, row.credentialKind); return }
-    connectTo(row.ip, "")
+    connectTo(row.ip, row.port, "")
   }
 
   onPanelOpenChanged: {
@@ -248,9 +258,11 @@ Column {
 
   // --------------------------------------------------------------- backend
 
+  // Constant availability probe: only the daemon binary is required now. All
+  // control is direct socket I/O, so no control binary is probed or run.
   Process {
     id: probeProc
-    command: ["sh", "-c", "command -v doubletake-ctl >/dev/null && command -v doubletake >/dev/null && echo yes"]
+    command: ["sh", "-c", "command -v doubletake >/dev/null && echo yes"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -261,25 +273,16 @@ Column {
     }
   }
 
-  Process {
-    id: statusProc
-    command: ["doubletake-ctl", "status"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        var resp = Airplay.parseResponse(text)
-        if (!resp) {
-          // An action in flight may be cycling the daemon on purpose; leave
-          // the UI alone rather than flashing "service not running".
-          if (actionProc.running) return
-          // No parseable answer means no daemon on the socket. Everything
-          // else the daemon reports comes back as JSON, ok:false included.
+  Controller {
+    id: controller
+
+    onAnswered: function (cmd, target, response) {
+      if (cmd === "status") {
+        if (response === null) {
           section.daemonUp = false
           section.streams = []
           section.rebuild()
           if (section.daemonStarting) {
-            // Still waiting on the daemon we just spawned. Give it a few
-            // seconds of polling before admitting it isn't coming up.
             section.daemonAttempts += 1
             if (section.daemonAttempts >= 12) {
               section.daemonStarting = false
@@ -291,16 +294,21 @@ Column {
           }
           return
         }
+
         section.daemonUp = true
         section.daemonStarting = false
         section.daemonFailed = false
         section.daemonAttempts = 0
-        section.streams = resp.streams || []
+        if (!response.ok) {
+          section.errorText = Protocol.sanitizeError(cmd, response)
+          return
+        }
+        section.streams = response.streams || []
         section.rebuild()
-        if (!devicesProc.running) devicesProc.running = true
+        controller.send("devices", {})
 
-        // A receiver that is waiting on a code opens the prompt on its own,
-        // so a connect started outside this panel still finishes here.
+        // A receiver waiting on a code opens the prompt on its own, so a
+        // connect started outside this panel can still finish here.
         for (var i = 0; i < section.rows.length; i++) {
           var row = section.rows[i]
           if (row.needsCredential && section.credentialIp === "") {
@@ -308,87 +316,76 @@ Column {
             break
           }
         }
+        return
       }
-    }
-  }
 
-  Process {
-    id: devicesProc
-    command: ["doubletake-ctl", "devices"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        var resp = Airplay.parseResponse(text)
-        if (!resp) return
-        section.devices = resp.devices || []
-        section.rebuild()
+      if (cmd === "devices") {
+        if (response !== null && response.ok) {
+          section.devices = response.devices || []
+          section.rebuild()
+        }
+        return
       }
-    }
-  }
 
-  Process {
-    id: discoverProc
-    command: ["doubletake-ctl", "discover"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
+      if (cmd === "discover") {
         section.discovering = false
-        var resp = Airplay.parseResponse(text)
-        if (!resp) return
-        if (resp.devices) section.devices = resp.devices
-        if (resp.streams) section.streams = resp.streams
-        section.rebuild()
+        if (response !== null && response.ok) {
+          if (response.devices) section.devices = response.devices
+          if (response.streams) section.streams = response.streams
+          section.rebuild()
+        } else {
+          section.errorText = Protocol.sanitizeError(cmd, response)
+        }
+        return
       }
-    }
-  }
 
-  Process {
-    id: actionProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        var target = section.busyIp
-        var kind = section.busyKind
-        var submitted = section.credentialSubmitted
-        section.busyIp = ""
-        section.busyKind = ""
-        section.credentialSubmitted = false
+      var kind = section.busyKind
+      var submitted = section.credentialSubmitted
+      section.busyIp = ""
+      section.busyKind = ""
+      section.credentialSubmitted = false
 
-        var resp = Airplay.parseResponse(text)
-        if (!resp) {
-          section.daemonUp = false
-          section.errorText = "The AirPlay service stopped responding."
-          section.refresh()
-          return
-        }
-
-        if (resp.needs_credential || resp.needs_pin) {
-          // Coming back asking again right after we sent something means the
-          // code was wrong — say so instead of silently re-prompting.
-          section.credentialRejected = submitted
-          section.openCredentialPrompt(target, resp.credential_kind || section.credentialKind)
-          if (submitted) {
-            section.credentialRejected = true
-            section.credentialText = ""
-          }
-        } else if (!resp.ok) {
-          section.errorText = String(resp.error || (kind === "connect" ? "Could not start mirroring." : "Could not stop mirroring."))
-          if (section.credentialIp === target) section.closeCredentialPrompt()
-        } else if (kind === "connect") {
-          section.closeCredentialPrompt()
-        }
-
+      if (response === null) {
+        section.daemonUp = false
+        section.errorText = Protocol.sanitizeError(cmd, null)
         section.refresh()
+        return
       }
+
+      if (response.needs_credential || response.needs_pin) {
+        // Asking again immediately after a submission means it was rejected.
+        section.openCredentialPrompt(target, response.credential_kind || section.credentialKind)
+        if (submitted) {
+          section.credentialRejected = true
+          section.credentialText = ""
+        }
+      } else if (!response.ok) {
+        section.errorText = Protocol.sanitizeError(cmd, response)
+        if (section.credentialIp === target) section.closeCredentialPrompt()
+      } else if (kind === "connect") {
+        section.closeCredentialPrompt()
+      }
+
+      section.refresh()
     }
   }
 
   // Poll while the panel is open, faster while something is in flight. When
-  // the panel is closed we only keep watching if a stream is live, so the bar
-  // glyph stays truthful without a subprocess ticking away on an idle desktop.
+  // closed we only watch a live stream so the bar glyph stays truthful; an idle
+  // desktop runs neither a timer nor a subprocess.
   Timer {
-    interval: section.panelOpen ? (section.settling || section.daemonStarting ? 1000 : 3000) : 10000
-    running: section.available && (section.panelOpen || section.mirroring)
+    interval: Protocol.pollInterval({
+      open: section.panelOpen,
+      settling: section.settling,
+      starting: section.daemonStarting,
+      mirroring: section.mirroring
+    })
+    running: section.available && Protocol.shouldPoll({
+      open: section.panelOpen,
+      settling: section.settling,
+      starting: section.daemonStarting,
+      mirroring: section.mirroring
+    })
     repeat: true
     onTriggered: section.refresh()
   }
@@ -662,7 +659,7 @@ Column {
           horizontalPadding: Style.spacing.sm
           verticalPadding: Style.spacing.controlPaddingY
           bordered: true
-          onClicked: section.reshare(deviceRow.row.ip, deviceRow.row.deviceId)
+          onClicked: section.resetSource(deviceRow.row.ip)
         }
 
         Button {
