@@ -107,6 +107,20 @@ test("every plugin-owned Text renders plain text", () => {
   }
 });
 
+test("plugin-owned Text never feeds implicitHeight back into height", () => {
+  const section = fs.readFileSync(
+    path.join(repoRoot, "airplay/Section.qml"),
+    "utf8"
+  );
+  for (const block of qmlBlocks(section, "Text")) {
+    assert.doesNotMatch(
+      block,
+      /\bheight\s*:\s*visible\s*\?\s*implicitHeight\s*:\s*0\b/,
+      `Text.height forms a runtime binding loop with implicitHeight:\n${block}`
+    );
+  }
+});
+
 test("receiver names are sanitized before shell-owned labels and tooltips", () => {
   const panel = fs.readFileSync(path.join(repoRoot, "Panel.qml"), "utf8");
   const section = fs.readFileSync(path.join(repoRoot, "airplay/Section.qml"), "utf8");

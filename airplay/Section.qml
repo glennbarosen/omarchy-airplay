@@ -663,7 +663,6 @@ Column {
           text: deviceRow.promptOpen ? "" : deviceRow.statusText
           textFormat: Text.PlainText
           visible: text !== ""
-          height: visible ? implicitHeight : 0
           color: deviceRow.statusColor
           font.family: section.bar.fontFamily
           font.pixelSize: Style.font.caption
